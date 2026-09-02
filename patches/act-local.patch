@@ -1,0 +1,418 @@
+diff --git a/.gitignore b/.gitignore
+index d1e4c69..d4b8c80 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -15,6 +15,18 @@ fuse.cfg
+ 
+ # Generation results
+ results/
++data/
++datasets/
++checkpoints/
++logs/
++wandb/
++
++*.hdf5
++*.pt
++*.pth
++*.ckpt
++*.mp4
++*.avi
+ 
+ ray/auth.json
+ 
+@@ -137,4 +149,4 @@ celerybeat.pid
+ dmypy.json
+ 
+ # Pyre type checker
+-.pyre/
+\ No newline at end of file
++.pyre/
+diff --git a/constants.py b/constants.py
+index f445350..f717ab6 100644
+--- a/constants.py
++++ b/constants.py
+@@ -1,32 +1,34 @@
++import os
+ import pathlib
+ 
+ ### Task parameters
+-DATA_DIR = '<put your data dir here>'
++DATA_DIR = os.environ.get('ACT_DATA_DIR', '<put your data dir here>')
++NUM_EPISODES = int(os.environ.get('ACT_NUM_EPISODES', '50'))
+ SIM_TASK_CONFIGS = {
+     'sim_transfer_cube_scripted':{
+         'dataset_dir': DATA_DIR + '/sim_transfer_cube_scripted',
+-        'num_episodes': 50,
++        'num_episodes': NUM_EPISODES,
+         'episode_len': 400,
+         'camera_names': ['top']
+     },
+ 
+     'sim_transfer_cube_human':{
+         'dataset_dir': DATA_DIR + '/sim_transfer_cube_human',
+-        'num_episodes': 50,
++        'num_episodes': NUM_EPISODES,
+         'episode_len': 400,
+         'camera_names': ['top']
+     },
+ 
+     'sim_insertion_scripted': {
+         'dataset_dir': DATA_DIR + '/sim_insertion_scripted',
+-        'num_episodes': 50,
++        'num_episodes': NUM_EPISODES,
+         'episode_len': 400,
+         'camera_names': ['top']
+     },
+ 
+     'sim_insertion_human': {
+         'dataset_dir': DATA_DIR + '/sim_insertion_human',
+-        'num_episodes': 50,
++        'num_episodes': NUM_EPISODES,
+         'episode_len': 500,
+         'camera_names': ['top']
+     },
+diff --git a/detr/main.py b/detr/main.py
+index 3c4a339..9cf469f 100644
+--- a/detr/main.py
++++ b/detr/main.py
+@@ -60,6 +60,8 @@ def get_args_parser():
+     parser.add_argument('--task_name', action='store', type=str, help='task_name', required=True)
+     parser.add_argument('--seed', action='store', type=int, help='seed', required=True)
+     parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
++    parser.add_argument('--num_rollouts', action='store', type=int, default=50,
++                        help='Number of evaluation rollouts (handled by imitate_episodes.py)')
+     parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
+     parser.add_argument('--chunk_size', action='store', type=int, help='chunk_size', required=False)
+     parser.add_argument('--temporal_agg', action='store_true')
+@@ -111,4 +113,3 @@ def build_CNNMLP_model_and_optimizer(args_override):
+                                   weight_decay=args.weight_decay)
+ 
+     return model, optimizer
+-
+diff --git a/imitate_episodes.py b/imitate_episodes.py
+index 34f9a37..fb1a12b 100644
+--- a/imitate_episodes.py
++++ b/imitate_episodes.py
+@@ -3,8 +3,9 @@ import numpy as np
+ import os
+ import pickle
+ import argparse
++import json
++import random
+ import matplotlib.pyplot as plt
+-from copy import deepcopy
+ from tqdm import tqdm
+ from einops import rearrange
+ 
+@@ -84,12 +85,17 @@ def main(args):
+         'task_name': task_name,
+         'seed': args['seed'],
+         'temporal_agg': args['temporal_agg'],
++        'num_rollouts': args['num_rollouts'],
+         'camera_names': camera_names,
++        'resume': args['resume'],
++        'save_every': args['save_every'],
++        'max_epochs_this_run': args['max_epochs_this_run'],
++        'eval_output_dir': args['eval_output_dir'],
+         'real_robot': not is_sim
+     }
+ 
+     if is_eval:
+-        ckpt_names = [f'policy_best.ckpt']
++        ckpt_names = [args['eval_ckpt']]
+         results = []
+         for ckpt_name in ckpt_names:
+             success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=True)
+@@ -109,12 +115,7 @@ def main(args):
+     with open(stats_path, 'wb') as f:
+         pickle.dump(stats, f)
+ 
+-    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
+-    best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+-
+-    # save best checkpoint
+-    ckpt_path = os.path.join(ckpt_dir, f'policy_best.ckpt')
+-    torch.save(best_state_dict, ckpt_path)
++    best_epoch, min_val_loss = train_bc(train_dataloader, val_dataloader, config)
+     print(f'Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}')
+ 
+ 
+@@ -151,6 +152,8 @@ def get_image(ts, camera_names):
+ def eval_bc(config, ckpt_name, save_episode=True):
+     set_seed(1000)
+     ckpt_dir = config['ckpt_dir']
++    eval_output_dir = config['eval_output_dir'] or ckpt_dir
++    os.makedirs(eval_output_dir, exist_ok=True)
+     state_dim = config['state_dim']
+     real_robot = config['real_robot']
+     policy_class = config['policy_class']
+@@ -195,7 +198,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
+ 
+     max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
+ 
+-    num_rollouts = 50
++    num_rollouts = config['num_rollouts']
+     episode_returns = []
+     highest_rewards = []
+     for rollout_id in range(num_rollouts):
+@@ -290,7 +293,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
+         print(f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}')
+ 
+         if save_episode:
+-            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'video{rollout_id}.mp4'))
++            save_videos(image_list, DT, video_path=os.path.join(eval_output_dir, f'video{rollout_id}.mp4'))
+ 
+     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
+     avg_return = np.mean(episode_returns)
+@@ -304,12 +307,25 @@ def eval_bc(config, ckpt_name, save_episode=True):
+ 
+     # save success rate to txt
+     result_file_name = 'result_' + ckpt_name.split('.')[0] + '.txt'
+-    with open(os.path.join(ckpt_dir, result_file_name), 'w') as f:
++    with open(os.path.join(eval_output_dir, result_file_name), 'w') as f:
+         f.write(summary_str)
+         f.write(repr(episode_returns))
+         f.write('\n\n')
+         f.write(repr(highest_rewards))
+ 
++    rollout_metrics_path = os.path.join(
++        eval_output_dir, 'rollouts_' + ckpt_name.split('.')[0] + '.jsonl')
++    with open(rollout_metrics_path, 'w') as metrics_file:
++        for rollout_id, (episode_return, highest_reward) in enumerate(
++                zip(episode_returns, highest_rewards)):
++            metrics_file.write(json.dumps({
++                'rollout': rollout_id,
++                'episode_return': float(episode_return),
++                'highest_reward': float(highest_reward),
++                'success': bool(highest_reward == env_max_reward),
++                'video': f'video{rollout_id}.mp4' if save_episode else None,
++            }) + '\n')
++
+     return success_rate, avg_return
+ 
+ 
+@@ -319,12 +335,44 @@ def forward_pass(data, policy):
+     return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
+ 
+ 
++def _to_cpu_scalars(summary):
++    return {key: float(value.item() if hasattr(value, 'item') else value) for key, value in summary.items()}
++
++
++def _atomic_torch_save(value, path):
++    temporary_path = f'{path}.tmp'
++    torch.save(value, temporary_path)
++    os.replace(temporary_path, path)
++
++
++def _capture_rng_state():
++    return {
++        'python': random.getstate(),
++        'numpy': np.random.get_state(),
++        'torch': torch.get_rng_state(),
++        'torch_cuda': torch.cuda.get_rng_state_all(),
++    }
++
++
++def _restore_rng_state(state):
++    random.setstate(state['python'])
++    np.random.set_state(state['numpy'])
++    torch.set_rng_state(state['torch'])
++    torch.cuda.set_rng_state_all(state['torch_cuda'])
++
++
+ def train_bc(train_dataloader, val_dataloader, config):
+     num_epochs = config['num_epochs']
+     ckpt_dir = config['ckpt_dir']
+     seed = config['seed']
+     policy_class = config['policy_class']
+     policy_config = config['policy_config']
++    save_every = config['save_every']
++    max_epochs_this_run = config['max_epochs_this_run']
++    if save_every <= 0:
++        raise ValueError('save_every must be positive')
++    if max_epochs_this_run is not None and max_epochs_this_run <= 0:
++        raise ValueError('max_epochs_this_run must be positive')
+ 
+     set_seed(seed)
+ 
+@@ -335,8 +383,44 @@ def train_bc(train_dataloader, val_dataloader, config):
+     train_history = []
+     validation_history = []
+     min_val_loss = np.inf
+-    best_ckpt_info = None
+-    for epoch in tqdm(range(num_epochs)):
++    best_epoch = None
++    start_epoch = 0
++    resume_path = config['resume']
++    if resume_path:
++        if resume_path == 'auto':
++            resume_path = os.path.join(ckpt_dir, 'training_state_last.ckpt')
++        elif not os.path.isabs(resume_path):
++            resume_path = os.path.join(ckpt_dir, resume_path)
++        checkpoint = torch.load(resume_path, map_location='cpu', weights_only=False)
++        policy.load_state_dict(checkpoint['policy'])
++        optimizer.load_state_dict(checkpoint['optimizer'])
++        start_epoch = checkpoint['next_epoch']
++        train_history = checkpoint['train_history']
++        validation_history = checkpoint['validation_history']
++        min_val_loss = checkpoint['min_val_loss']
++        best_epoch = checkpoint['best_epoch']
++        _restore_rng_state(checkpoint['rng_state'])
++        print(f'Resumed: {resume_path} (next epoch: {start_epoch})')
++
++        metrics_path = os.path.join(ckpt_dir, 'metrics.jsonl')
++        if os.path.exists(metrics_path):
++            with open(metrics_path) as metrics_file:
++                completed_metrics = [
++                    line for line in metrics_file
++                    if json.loads(line)['epoch'] < start_epoch
++                ]
++            with open(metrics_path, 'w') as metrics_file:
++                metrics_file.writelines(completed_metrics)
++
++    end_epoch = num_epochs
++    if max_epochs_this_run is not None:
++        end_epoch = min(num_epochs, start_epoch + max_epochs_this_run)
++    if start_epoch >= num_epochs:
++        print(f'Target already reached: next epoch {start_epoch}, target {num_epochs}')
++        return best_epoch, min_val_loss
++
++    metrics_path = os.path.join(ckpt_dir, 'metrics.jsonl')
++    for epoch in tqdm(range(start_epoch, end_epoch)):
+         print(f'\nEpoch {epoch}')
+         # validation
+         with torch.inference_mode():
+@@ -346,16 +430,17 @@ def train_bc(train_dataloader, val_dataloader, config):
+                 forward_dict = forward_pass(data, policy)
+                 epoch_dicts.append(forward_dict)
+             epoch_summary = compute_dict_mean(epoch_dicts)
+-            validation_history.append(epoch_summary)
++            validation_history.append(_to_cpu_scalars(epoch_summary))
+ 
+             epoch_val_loss = epoch_summary['loss']
+             if epoch_val_loss < min_val_loss:
+-                min_val_loss = epoch_val_loss
+-                best_ckpt_info = (epoch, min_val_loss, deepcopy(policy.state_dict()))
++                min_val_loss = float(epoch_val_loss.item())
++                best_epoch = epoch
++                _atomic_torch_save(policy.state_dict(), os.path.join(ckpt_dir, 'policy_best.ckpt'))
+         print(f'Val loss:   {epoch_val_loss:.5f}')
+         summary_string = ''
+         for k, v in epoch_summary.items():
+-            summary_string += f'{k}: {v.item():.3f} '
++            summary_string += f'{k}: {float(v):.3f} '
+         print(summary_string)
+ 
+         # training
+@@ -368,32 +453,53 @@ def train_bc(train_dataloader, val_dataloader, config):
+             loss.backward()
+             optimizer.step()
+             optimizer.zero_grad()
+-            train_history.append(detach_dict(forward_dict))
++            train_history.append(_to_cpu_scalars(detach_dict(forward_dict)))
+         epoch_summary = compute_dict_mean(train_history[(batch_idx+1)*epoch:(batch_idx+1)*(epoch+1)])
+         epoch_train_loss = epoch_summary['loss']
+         print(f'Train loss: {epoch_train_loss:.5f}')
+         summary_string = ''
+         for k, v in epoch_summary.items():
+-            summary_string += f'{k}: {v.item():.3f} '
++            summary_string += f'{k}: {float(v):.3f} '
+         print(summary_string)
+ 
+-        if epoch % 100 == 0:
+-            ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
+-            torch.save(policy.state_dict(), ckpt_path)
+-            plot_history(train_history, validation_history, epoch, ckpt_dir, seed)
+-
+-    ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
+-    torch.save(policy.state_dict(), ckpt_path)
+-
+-    best_epoch, min_val_loss, best_state_dict = best_ckpt_info
+-    ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{best_epoch}_seed_{seed}.ckpt')
+-    torch.save(best_state_dict, ckpt_path)
+-    print(f'Training finished:\nSeed {seed}, val loss {min_val_loss:.6f} at epoch {best_epoch}')
+-
+-    # save training curves
+-    plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed)
++        with open(metrics_path, 'a') as metrics_file:
++            metrics_file.write(json.dumps({
++                'epoch': epoch,
++                'train': _to_cpu_scalars(epoch_summary),
++                'validation': validation_history[-1],
++                'best_epoch': best_epoch,
++                'min_val_loss': min_val_loss,
++            }) + '\n')
++
++        should_save = (epoch + 1) % save_every == 0 or epoch + 1 == end_epoch
++        if should_save:
++            if epoch + 1 == end_epoch:
++                ckpt_path = os.path.join(ckpt_dir, f'policy_epoch_{epoch}_seed_{seed}.ckpt')
++                _atomic_torch_save(policy.state_dict(), ckpt_path)
++            training_state = {
++                'format_version': 1,
++                'next_epoch': epoch + 1,
++                'policy': policy.state_dict(),
++                'optimizer': optimizer.state_dict(),
++                'train_history': train_history,
++                'validation_history': validation_history,
++                'min_val_loss': min_val_loss,
++                'best_epoch': best_epoch,
++                'rng_state': _capture_rng_state(),
++                'config': config,
++            }
++            _atomic_torch_save(training_state, os.path.join(ckpt_dir, 'training_state_last.ckpt'))
++            plot_history(train_history, validation_history, epoch + 1, ckpt_dir, seed)
++
++    _atomic_torch_save(policy.state_dict(), os.path.join(ckpt_dir, 'policy_last.ckpt'))
++
++    if end_epoch == num_epochs:
++        print(f'Training finished:\nSeed {seed}, val loss {min_val_loss:.6f} at epoch {best_epoch}')
++    else:
++        print(f'Training segment finished at epoch {end_epoch - 1}; target is epoch {num_epochs - 1}')
+ 
+-    return best_ckpt_info
++    plot_history(train_history, validation_history, end_epoch, ckpt_dir, seed)
++    return best_epoch, min_val_loss
+ 
+ 
+ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+@@ -401,8 +507,8 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+     for key in train_history[0]:
+         plot_path = os.path.join(ckpt_dir, f'train_val_{key}_seed_{seed}.png')
+         plt.figure()
+-        train_values = [summary[key].item() for summary in train_history]
+-        val_values = [summary[key].item() for summary in validation_history]
++        train_values = [float(summary[key]) for summary in train_history]
++        val_values = [float(summary[key]) for summary in validation_history]
+         plt.plot(np.linspace(0, num_epochs-1, len(train_history)), train_values, label='train')
+         plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
+         # plt.ylim([-0.1, 1])
+@@ -410,6 +516,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+         plt.legend()
+         plt.title(key)
+         plt.savefig(plot_path)
++        plt.close()
+     print(f'Saved plots to {ckpt_dir}')
+ 
+ 
+@@ -424,6 +531,18 @@ if __name__ == '__main__':
+     parser.add_argument('--seed', action='store', type=int, help='seed', required=True)
+     parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
+     parser.add_argument('--lr', action='store', type=float, help='lr', required=True)
++    parser.add_argument('--num_rollouts', action='store', type=int, default=50,
++                        help='Number of evaluation rollouts (default: 50)')
++    parser.add_argument('--eval_ckpt', type=str, default='policy_best.ckpt',
++                        help='Checkpoint filename to evaluate (default: policy_best.ckpt)')
++    parser.add_argument('--eval_output_dir', type=str, default=None,
++                        help='Directory for evaluation videos and metrics (default: ckpt_dir)')
++    parser.add_argument('--resume', nargs='?', const='auto', default=None,
++                        help='Resume a training-state checkpoint; omit the path for training_state_last.ckpt')
++    parser.add_argument('--save_every', type=int, default=100,
++                        help='Save policy and resumable training state every N epochs')
++    parser.add_argument('--max_epochs_this_run', type=int, default=None,
++                        help='Run at most N epochs in this process while keeping num_epochs as the global target')
+ 
+     # for ACT
+     parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
