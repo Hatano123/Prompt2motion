@@ -1,0 +1,15 @@
+numpy==1.26.4
+pyquaternion==0.9.9
+PyYAML==6.0.2
+rospkg==1.6.0
+pexpect==4.9.0
+mujoco==2.3.7
+dm_control==1.0.14
+opencv-python-headless==4.10.0.84
+matplotlib==3.7.5
+einops==0.8.1
+packaging==24.2
+h5py==3.11.0
+ipython==8.37.0
+tqdm==4.67.1
+

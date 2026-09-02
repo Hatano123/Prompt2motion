@@ -1,0 +1,120 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=04:00:00
+#PBS -N act50_train
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+experiment_name="${EXPERIMENT_NAME:-act50_baseline}"
+total_epochs="${TOTAL_EPOCHS:-2000}"
+epochs_per_job="${EPOCHS_PER_JOB:-500}"
+save_every="${SAVE_EVERY:-100}"
+batch_size="${BATCH_SIZE:-8}"
+required_tmp_gib="${REQUIRED_TMP_GIB:-30}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+checkpoint_dir="$submit_dir/checkpoints/act/$experiment_name"
+result_dir="$submit_dir/results/act/$experiment_name/jobs/$safe_job_tag"
+
+for value in "$total_epochs" "$epochs_per_job" "$save_every" "$batch_size" "$required_tmp_gib"; do
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] positive integer required, got: $value" >&2
+        exit 2
+    fi
+done
+if [[ ! "$experiment_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[ERROR] unsafe EXPERIMENT_NAME: $experiment_name" >&2
+    exit 2
+fi
+
+mkdir -p "$tmp_work_base" "$checkpoint_dir" "$result_dir"
+workdir="$(mktemp -d "${tmp_work_base%/}/act50_train_${safe_job_tag}_XXXXXX")"
+monitor_pid=""
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [[ -n "$monitor_pid" ]]; then
+        kill "$monitor_pid" 2>/dev/null || true
+        wait "$monitor_pid" 2>/dev/null || true
+    fi
+    if [[ "${KEEP_TMP:-0}" == "1" ]]; then
+        echo "[INFO] KEEP_TMP=1; staged files remain at: $workdir"
+    else
+        rm -rf -- "$workdir"
+        echo "[INFO] removed temporary workdir: $workdir"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+available_kb="$(df -Pk "$tmp_work_base" | awk 'NR == 2 {print $4}')"
+required_kb=$((required_tmp_gib * 1024 * 1024))
+if (( available_kb < required_kb )); then
+    echo "[ERROR] /tmp requires at least ${required_tmp_gib} GiB free; available_kb=$available_kb" >&2
+    exit 3
+fi
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+stage_act50_dataset
+
+find "$checkpoint_dir" -maxdepth 1 -type f -name '*.tmp' -delete
+resume_args=()
+if [[ -s "$checkpoint_dir/training_state_last.ckpt" ]]; then
+    resume_args=(--resume)
+fi
+
+cd "$repo_stage_dir"
+echo "[INFO] experiment=$experiment_name total_epochs=$total_epochs epochs_per_job=$epochs_per_job save_every=$save_every"
+echo "[INFO] checkpoint_dir=$checkpoint_dir resume=${resume_args[*]:-no}"
+train_log="$result_dir/train.log"
+gpu_log="$result_dir/gpu_usage.log"
+(
+    while true; do
+        date -Is
+        rocm-smi --showuse --showmemuse || true
+        sleep 15
+    done
+) >"$gpu_log" 2>&1 &
+monitor_pid=$!
+
+"$act_python" imitate_episodes.py \
+    --task_name sim_transfer_cube_scripted \
+    --ckpt_dir "$checkpoint_dir" \
+    --policy_class ACT \
+    --kl_weight 10 \
+    --chunk_size 100 \
+    --hidden_dim 512 \
+    --batch_size "$batch_size" \
+    --dim_feedforward 3200 \
+    --num_epochs "$total_epochs" \
+    --max_epochs_this_run "$epochs_per_job" \
+    --save_every "$save_every" \
+    --lr 1e-5 \
+    --seed 0 \
+    "${resume_args[@]}" 2>&1 | tee "$train_log"
+
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+monitor_pid=""
+
+export CHECKPOINT_DIR="$checkpoint_dir"
+"$act_python" - <<'PY_STATE' | tee "$result_dir/state_summary.txt"
+import json
+import os
+import torch
+path = os.path.join(os.environ['CHECKPOINT_DIR'], 'training_state_last.ckpt')
+state = torch.load(path, map_location='cpu', weights_only=False)
+summary = {
+    'next_epoch': state['next_epoch'],
+    'best_epoch': state['best_epoch'],
+    'min_val_loss': state['min_val_loss'],
+}
+print(json.dumps(summary, sort_keys=True))
+PY_STATE
+cp -f "$checkpoint_dir/metrics.jsonl" "$result_dir/metrics_snapshot.jsonl"
+echo "[INFO] training segment completed"

@@ -1,0 +1,96 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=2:ngpus=1:mem=16gb
+#PBS -l walltime=00:45:00
+#PBS -N act_torch_probe
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+micromamba_bin="$submit_dir/tools/micromamba"
+result_dir="$submit_dir/results/act/gpu_probe_${safe_job_tag}"
+
+mkdir -p "$tmp_work_base" "$result_dir"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_gpu_probe_${safe_job_tag}_XXXXXX")"
+
+case "$workdir" in
+    "/tmp/${USER}_work/act_gpu_probe_${safe_job_tag}_"*) ;;
+    *)
+        echo "[ERROR] unsafe workdir: $workdir" >&2
+        exit 2
+        ;;
+esac
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [[ "${KEEP_TMP:-0}" == "1" ]]; then
+        echo "[INFO] KEEP_TMP=1; staged files remain at: $workdir"
+    else
+        rm -rf -- "$workdir"
+        echo "[INFO] removed temporary workdir: $workdir"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+export MAMBA_ROOT_PREFIX="$workdir/mamba-root"
+export PIP_CACHE_DIR="$workdir/pip-cache"
+export TMPDIR="$workdir/tmp"
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+
+probe_log="$result_dir/probe.log"
+{
+    echo "[system]"
+    echo "job_id=$job_tag"
+    echo "host=$(hostname)"
+    env | sort | grep -Ei '(^|_)(CUDA|HIP|ROCR|HSA|GPU|VISIBLE|PBS)' || true
+    echo "[/dev]"
+    ls -l /dev/kfd /dev/dri 2>&1 || true
+    echo "[rocm-smi]"
+    rocm-smi --showproductname --showuniqueid --showpids --showmeminfo vram || true
+} | tee "$probe_log"
+
+"$micromamba_bin" create -y -n probe -c conda-forge python=3.10 pip
+probe_python="$MAMBA_ROOT_PREFIX/envs/probe/bin/python"
+"$probe_python" -m pip install --no-cache-dir \
+    torch==2.8.0 --index-url https://download.pytorch.org/whl/rocm6.4
+
+run_probe() {
+    label="$1"
+    shift
+    echo "[$label]" | tee -a "$probe_log"
+    env "$@" "$probe_python" - <<'PY' 2>&1 | tee -a "$probe_log"
+import os
+import torch
+
+for name in (
+    "CUDA_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "ROCR_VISIBLE_DEVICES",
+    "GPU_DEVICE_ORDINAL",
+):
+    print(f"{name}={os.environ.get(name, '<unset>')}")
+print("torch=", torch.__version__)
+print("hip=", torch.version.hip)
+print("available=", torch.cuda.is_available())
+print("count=", torch.cuda.device_count())
+for index in range(torch.cuda.device_count()):
+    print(f"device[{index}]=", torch.cuda.get_device_name(index))
+if torch.cuda.is_available():
+    x = torch.ones((512, 512), device="cuda")
+    print("matmul_checksum=", (x @ x).sum().item())
+PY
+}
+
+original_cuda_visible="${CUDA_VISIBLE_DEVICES-}"
+run_probe original
+run_probe cuda_unset -u CUDA_VISIBLE_DEVICES -u HIP_VISIBLE_DEVICES -u ROCR_VISIBLE_DEVICES -u GPU_DEVICE_ORDINAL
+run_probe device_0 CUDA_VISIBLE_DEVICES=0 HIP_VISIBLE_DEVICES=0 ROCR_VISIBLE_DEVICES=0 GPU_DEVICE_ORDINAL=0
+run_probe device_1 CUDA_VISIBLE_DEVICES=1 HIP_VISIBLE_DEVICES=1 ROCR_VISIBLE_DEVICES=1 GPU_DEVICE_ORDINAL=1
+
+echo "original_CUDA_VISIBLE_DEVICES=${original_cuda_visible:-<unset>}" | tee -a "$probe_log"
+echo "[INFO] GPU probe completed: $probe_log"

@@ -1,0 +1,81 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=04:00:00
+#PBS -N act50_eval
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+experiment_name="${EXPERIMENT_NAME:-act50_baseline}"
+eval_epoch="${EVAL_EPOCH:?EVAL_EPOCH is required (completed epoch count, e.g. 500)}"
+num_rollouts="${EVAL_ROLLOUTS:-50}"
+batch_size="${BATCH_SIZE:-8}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+checkpoint_dir="$submit_dir/checkpoints/act/$experiment_name"
+eval_ckpt="policy_epoch_$((eval_epoch - 1))_seed_0.ckpt"
+result_dir="$submit_dir/results/act/$experiment_name/eval/epoch_${eval_epoch}"
+
+for value in "$eval_epoch" "$num_rollouts" "$batch_size"; do
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] positive integer required, got: $value" >&2
+        exit 2
+    fi
+done
+if [[ ! "$experiment_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[ERROR] unsafe EXPERIMENT_NAME: $experiment_name" >&2
+    exit 2
+fi
+if [[ ! -s "$checkpoint_dir/$eval_ckpt" || ! -s "$checkpoint_dir/dataset_stats.pkl" ]]; then
+    echo "[ERROR] checkpoint or dataset stats missing for epoch $eval_epoch" >&2
+    exit 3
+fi
+
+mkdir -p "$tmp_work_base" "$result_dir"
+workdir="$(mktemp -d "${tmp_work_base%/}/act50_eval_${safe_job_tag}_XXXXXX")"
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [[ "${KEEP_TMP:-0}" == "1" ]]; then
+        echo "[INFO] KEEP_TMP=1; staged files remain at: $workdir"
+    else
+        rm -rf -- "$workdir"
+        echo "[INFO] removed temporary workdir: $workdir"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused_dataset"
+export ACT_NUM_EPISODES=50
+
+cd "$repo_stage_dir"
+"$act_python" imitate_episodes.py \
+    --eval \
+    --eval_ckpt "$eval_ckpt" \
+    --eval_output_dir "$result_dir" \
+    --num_rollouts "$num_rollouts" \
+    --task_name sim_transfer_cube_scripted \
+    --ckpt_dir "$checkpoint_dir" \
+    --policy_class ACT \
+    --kl_weight 10 \
+    --chunk_size 100 \
+    --hidden_dim 512 \
+    --batch_size "$batch_size" \
+    --dim_feedforward 3200 \
+    --num_epochs "$eval_epoch" \
+    --lr 1e-5 \
+    --seed 0 2>&1 | tee "$result_dir/eval.log"
+
+result_txt="$result_dir/result_policy_epoch_$((eval_epoch - 1))_seed_0.txt"
+success_rate="$(awk -F': ' '/^Success rate:/ {print $2}' "$result_txt")"
+average_return="$(awk -F': ' '/^Average return:/ {print $2}' "$result_txt")"
+printf 'epoch,success_rate,average_return,rollouts,checkpoint,job_id\n%s,%s,%s,%s,%s,%s\n' \
+    "$eval_epoch" "$success_rate" "$average_return" "$num_rollouts" "$eval_ckpt" "$job_tag" \
+    > "$result_dir/summary.csv"
+echo "[INFO] evaluation completed: epoch=$eval_epoch success_rate=$success_rate average_return=$average_return"

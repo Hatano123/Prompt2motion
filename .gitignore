@@ -1,0 +1,63 @@
+# Datasets and local archives
+/archives/datasets/
+/data/
+/dataset/
+/datasets/
+*.h5
+*.hdf5
+
+# Training outputs, checkpoints, and experiment tracking
+/checkpoints/
+/results/
+/logs/
+/outputs/
+/runs/
+/wandb/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# Batch scheduler and application logs
+*.log
+*.out
+*.err
+*.o[0-9]*
+*.e[0-9]*
+slurm-*.out
+
+# Generated media and serialized experiment data
+*.pkl
+*.pickle
+*.mp4
+*.avi
+*.mov
+
+# External source checkouts and downloaded tools
+/repos/
+/tools/micromamba
+
+# Python caches, environments, and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

@@ -1,0 +1,320 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=04:00:00
+#PBS -N act_smoke
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+source_repo="$submit_dir/repos/act"
+micromamba_bin="$submit_dir/tools/micromamba"
+result_dir="$submit_dir/results/act/qsub_${safe_job_tag}"
+archive_dir="$submit_dir/archives/datasets"
+train_episodes="${TRAIN_EPISODES:-4}"
+train_epochs="${TRAIN_EPOCHS:-2}"
+eval_rollouts="${EVAL_ROLLOUTS:-1}"
+train_batch_size="${TRAIN_BATCH_SIZE:-2}"
+required_tmp_gib="${REQUIRED_TMP_GIB:-50}"
+archive_training_dataset="${ARCHIVE_TRAINING_DATASET:-0}"
+
+for numeric_value in "$train_episodes" "$train_epochs" "$eval_rollouts" "$train_batch_size" "$required_tmp_gib"; do
+    if [[ ! "$numeric_value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] positive integer required, got: $numeric_value" >&2
+        exit 2
+    fi
+done
+
+case "$archive_training_dataset" in
+    0|1) ;;
+    *)
+        echo "[ERROR] ARCHIVE_TRAINING_DATASET must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+
+mkdir -p "$tmp_work_base" "$result_dir" "$archive_dir"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_${safe_job_tag}_XXXXXX")"
+
+case "$workdir" in
+    "/tmp/${USER}_work/act_${safe_job_tag}_"*) ;;
+    *)
+        echo "[ERROR] unsafe workdir: $workdir" >&2
+        exit 2
+        ;;
+esac
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    if [[ -d "$workdir" ]]; then
+        find "$workdir" -maxdepth 3 -type f -name '*.log' -exec cp -f {} "$result_dir"/ \; 2>/dev/null || true
+        find "$workdir" -maxdepth 2 -type f -name '*freeze*.txt' -exec cp -f {} "$result_dir"/ \; 2>/dev/null || true
+    fi
+    if [[ "${KEEP_TMP:-0}" == "1" ]]; then
+        echo "[INFO] KEEP_TMP=1; staged files remain at: $workdir"
+    else
+        rm -rf -- "$workdir"
+        echo "[INFO] removed temporary workdir: $workdir"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+available_kb="$(df -Pk "$tmp_work_base" | awk 'NR == 2 {print $4}')"
+required_kb=$((required_tmp_gib * 1024 * 1024))
+if (( available_kb < required_kb )); then
+    echo "[ERROR] /tmp requires at least ${required_tmp_gib} GiB free; available_kb=$available_kb" >&2
+    exit 3
+fi
+
+repo_stage_dir="$workdir/repo"
+dataset_root="$workdir/dataset"
+one_episode_dir="$workdir/one_episode"
+checkpoint_dir="$workdir/checkpoints"
+runtime_tmp="$workdir/tmp"
+mkdir -p "$repo_stage_dir" "$dataset_root" "$one_episode_dir" "$checkpoint_dir" "$runtime_tmp"
+
+if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete --exclude '.git/' "$source_repo/" "$repo_stage_dir/"
+else
+    cp -a "$source_repo/." "$repo_stage_dir/"
+    rm -rf -- "$repo_stage_dir/.git"
+fi
+
+export MAMBA_ROOT_PREFIX="$workdir/mamba-root"
+export PIP_CACHE_DIR="$runtime_tmp/pip-cache"
+export XDG_CACHE_HOME="$runtime_tmp/xdg-cache"
+export MPLCONFIGDIR="$runtime_tmp/matplotlib"
+export TMPDIR="$runtime_tmp"
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export ACT_DATA_DIR="$dataset_root"
+export ACT_NUM_EPISODES="$train_episodes"
+mkdir -p "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR"
+
+pbs_cuda_visible="${CUDA_VISIBLE_DEVICES-}"
+case "$pbs_cuda_visible" in
+    [0-9]*-*)
+        allocated_gpu="${pbs_cuda_visible%%-*}"
+        if [[ ! "$allocated_gpu" =~ ^[0-9]+$ ]]; then
+            echo "[ERROR] cannot normalize CUDA_VISIBLE_DEVICES=$pbs_cuda_visible" >&2
+            exit 4
+        fi
+        export CUDA_VISIBLE_DEVICES="$allocated_gpu"
+        ;;
+    ''|*[!0-9,]*)
+        echo "[ERROR] unsupported CUDA_VISIBLE_DEVICES=${pbs_cuda_visible:-<unset>}" >&2
+        exit 4
+        ;;
+esac
+
+echo "[INFO] host=$(hostname)"
+echo "[INFO] workdir=$workdir"
+echo "[INFO] PBS CUDA_VISIBLE_DEVICES=${pbs_cuda_visible:-<unset>}"
+echo "[INFO] normalized CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "[INFO] train_episodes=$train_episodes train_epochs=$train_epochs eval_rollouts=$eval_rollouts batch_size=$train_batch_size"
+df -h "$tmp_work_base" /home
+rocm-smi --showproductname --showmeminfo vram --showdriverversion
+
+"$micromamba_bin" create -y -n act -f "$submit_dir/environment-act-rocm.yml"
+act_python="$MAMBA_ROOT_PREFIX/envs/act/bin/python"
+export LD_LIBRARY_PATH="$MAMBA_ROOT_PREFIX/envs/act/lib:${LD_LIBRARY_PATH:-}"
+export __EGL_VENDOR_LIBRARY_FILENAMES="$MAMBA_ROOT_PREFIX/envs/act/share/glvnd/egl_vendor.d/50_mesa.json"
+export LIBGL_ALWAYS_SOFTWARE=1
+
+"$act_python" -m pip install --no-cache-dir \
+    torch==2.8.0 torchvision==0.23.0 \
+    --index-url https://download.pytorch.org/whl/rocm6.4
+"$act_python" -m pip install --no-cache-dir -r "$submit_dir/requirements-act.txt"
+"$act_python" -m pip install --no-cache-dir --no-deps -e "$repo_stage_dir/detr"
+"$act_python" -m pip freeze > "$workdir/environment_freeze.txt"
+
+"$act_python" - <<'PY' | tee "$workdir/import_test.log"
+import torch
+import mujoco
+import dm_control
+import h5py
+import einops
+
+print("torch:", torch.__version__)
+print("torch HIP:", torch.version.hip)
+print("torch CUDA runtime:", torch.version.cuda)
+print("GPU available through torch.cuda API:", torch.cuda.is_available())
+print("GPU count:", torch.cuda.device_count())
+if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+    raise RuntimeError("exactly one PBS-allocated GPU must be visible")
+print("GPU:", torch.cuda.get_device_name(0))
+x = torch.ones((512, 512), device="cuda")
+print("GPU matmul checksum:", (x @ x).sum().item())
+print("mujoco:", mujoco.__version__)
+print("Imports OK")
+PY
+
+cd "$repo_stage_dir"
+
+echo "[INFO] generating the first single episode"
+"$act_python" record_sim_episodes.py \
+    --task_name sim_transfer_cube_scripted \
+    --dataset_dir "$one_episode_dir" \
+    --num_episodes 1 | tee "$workdir/record_one_episode.log"
+
+export ONE_EPISODE_DIR="$one_episode_dir"
+"$act_python" - <<'PY' | tee "$workdir/hdf5_inspection.log"
+import os
+import h5py
+
+path = os.path.join(os.environ["ONE_EPISODE_DIR"], "episode_0.hdf5")
+with h5py.File(path, "r") as root:
+    print("file:", path)
+    print("sim:", root.attrs["sim"])
+    def show(name, obj):
+        if isinstance(obj, h5py.Dataset):
+            print(name, "shape=", obj.shape, "dtype=", obj.dtype)
+    root.visititems(show)
+PY
+
+"$act_python" visualize_episodes.py \
+    --dataset_dir "$one_episode_dir" \
+    --episode_idx 0 | tee "$workdir/visualize_episode.log"
+
+export EPISODE_ZIP="$workdir/act_one_episode.zip"
+"$act_python" - <<'PY'
+import os
+import zipfile
+
+source = os.path.join(os.environ["ONE_EPISODE_DIR"], "episode_0.hdf5")
+target = os.environ["EPISODE_ZIP"]
+with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+    archive.write(source, arcname="episode_0.hdf5")
+with zipfile.ZipFile(target, "r") as archive:
+    bad = archive.testzip()
+    if bad is not None:
+        raise RuntimeError(f"corrupt member: {bad}")
+print(target)
+PY
+
+cp -f "$EPISODE_ZIP" "$archive_dir/act_one_episode.zip"
+cp -f "$one_episode_dir/episode_0_video.mp4" "$result_dir/"
+cp -f "$one_episode_dir/episode_0_qpos.png" "$result_dir/"
+
+echo "[INFO] generating $train_episodes episodes for training"
+training_dataset="$dataset_root/sim_transfer_cube_scripted"
+"$act_python" record_sim_episodes.py \
+    --task_name sim_transfer_cube_scripted \
+    --dataset_dir "$training_dataset" \
+    --num_episodes "$train_episodes" | tee "$workdir/record_training_episodes.log"
+
+if [[ "$archive_training_dataset" == "1" ]]; then
+    training_archive="$workdir/act_sim_transfer_cube_scripted_${train_episodes}episodes.zip"
+    export TRAINING_DATASET="$training_dataset"
+    export TRAINING_ARCHIVE="$training_archive"
+    "$act_python" - <<'PY' | tee "$workdir/archive_training_dataset.log"
+import os
+import zipfile
+
+source = os.environ["TRAINING_DATASET"]
+target = os.environ["TRAINING_ARCHIVE"]
+with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+    for name in sorted(os.listdir(source)):
+        path = os.path.join(source, name)
+        if os.path.isfile(path):
+            archive.write(path, arcname=os.path.join("sim_transfer_cube_scripted", name))
+with zipfile.ZipFile(target, "r") as archive:
+    bad = archive.testzip()
+    if bad is not None:
+        raise RuntimeError(f"corrupt member: {bad}")
+    print(f"members={len(archive.namelist())}")
+print(target)
+PY
+    cp -f "$training_archive" "$archive_dir/$(basename "$training_archive")"
+fi
+
+echo "[INFO] starting $train_epochs-epoch ACT training"
+train_log="$workdir/train.log"
+gpu_log="$workdir/gpu_usage.log"
+"$act_python" imitate_episodes.py \
+    --task_name sim_transfer_cube_scripted \
+    --ckpt_dir "$checkpoint_dir" \
+    --policy_class ACT \
+    --kl_weight 10 \
+    --chunk_size 100 \
+    --hidden_dim 512 \
+    --batch_size "$train_batch_size" \
+    --dim_feedforward 3200 \
+    --num_epochs "$train_epochs" \
+    --lr 1e-5 \
+    --seed 0 >"$train_log" 2>&1 &
+train_pid=$!
+(
+    while kill -0 "$train_pid" 2>/dev/null; do
+        date -Is
+        rocm-smi --showuse --showmemuse || true
+        sleep 5
+    done
+) >"$gpu_log" 2>&1 &
+monitor_pid=$!
+
+set +e
+wait "$train_pid"
+train_status=$?
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+set -e
+tail -120 "$train_log"
+if (( train_status != 0 )); then
+    echo "[ERROR] mini training failed with status $train_status" >&2
+    exit "$train_status"
+fi
+
+cp -f "$checkpoint_dir/policy_best.ckpt" "$result_dir/"
+cp -f "$checkpoint_dir/policy_last.ckpt" "$result_dir/"
+cp -f "$checkpoint_dir/dataset_stats.pkl" "$result_dir/"
+find "$checkpoint_dir" -maxdepth 1 -type f -name '*.png' -exec cp -f {} "$result_dir"/ \;
+
+echo "[INFO] evaluating $eval_rollouts rollouts"
+"$act_python" imitate_episodes.py \
+    --eval \
+    --num_rollouts "$eval_rollouts" \
+    --task_name sim_transfer_cube_scripted \
+    --ckpt_dir "$checkpoint_dir" \
+    --policy_class ACT \
+    --kl_weight 10 \
+    --chunk_size 100 \
+    --hidden_dim 512 \
+    --batch_size "$train_batch_size" \
+    --dim_feedforward 3200 \
+    --num_epochs "$train_epochs" \
+    --lr 1e-5 \
+    --seed 0 | tee "$workdir/eval.log"
+
+cp -f "$checkpoint_dir/result_policy_best.txt" "$result_dir/"
+for evaluation_video in "$checkpoint_dir"/video*.mp4; do
+    if [[ -f "$evaluation_video" ]]; then
+        video_name="$(basename "$evaluation_video")"
+        cp -f "$evaluation_video" "$result_dir/eval_${video_name}"
+    fi
+done
+cp -f "$workdir/environment_freeze.txt" "$result_dir/"
+cp -f "$workdir"/*.log "$result_dir/"
+
+{
+    echo "job_id=$job_tag"
+    echo "host=$(hostname)"
+    echo "workdir=$workdir"
+    echo "source_commit=$(git -C "$source_repo" rev-parse HEAD)"
+    echo "dataset_single=$(du -sh "$one_episode_dir" | awk '{print $1}')"
+    echo "dataset_training=$(du -sh "$training_dataset" | awk '{print $1}')"
+    echo "archive_single=$(du -sh "$EPISODE_ZIP" | awk '{print $1}')"
+    if [[ "$archive_training_dataset" == "1" ]]; then
+        echo "archive_training=$(du -sh "$training_archive" | awk '{print $1}')"
+    fi
+    echo "checkpoints=$(du -sh "$checkpoint_dir" | awk '{print $1}')"
+    echo "result_dir=$(du -sh "$result_dir" | awk '{print $1}')"
+} | tee "$result_dir/storage_report.txt"
+
+echo "[INFO] ACT smoke pipeline completed"
