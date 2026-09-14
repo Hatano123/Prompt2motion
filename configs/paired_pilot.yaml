@@ -1,0 +1,26 @@
+experiment: paired_insertion_10demo_seed0
+task: sim_insertion_scripted
+dataset:
+  archive: archives/datasets/act_sim_insertion_scripted_top_side_seed0_10episodes.zip
+  generation_seed: 0
+  demonstrations: 10
+  cameras: [top, side]
+split:
+  seed: 1
+  train_episode_ids: [2, 9, 6, 4, 0, 3, 1, 7]
+  validation_episode_ids: [8, 5]
+models:
+  single_top: [top]
+  single_side: [side]
+  multi: [top, side]
+training:
+  seed: 0
+  epochs: 2000
+  checkpoint_epochs: [500, 1000, 1500, 2000]
+  batch_size: 8
+  learning_rate: 1.0e-5
+evaluation:
+  initial_states: archives/environments/sim_insertion_eval_seed1000_50.json
+  seed: 1000
+  rollouts: 50
+  condition: clean

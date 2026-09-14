@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=08:00:00
+#PBS -N act_pair_eval
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_eval_${model_name}_XXXXXX")"
+source_dir="$submit_dir/results/act/paired_pilot/$model_name/train_seed0/checkpoints"
+result_dir="$submit_dir/results/act/paired_pilot/$model_name/eval_clean"
+manifest="$submit_dir/archives/environments/sim_insertion_eval_seed1000_50.json"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir"/epoch_* "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+test -s "$manifest"
+test -s "$source_dir/dataset_stats.pkl"
+mkdir -p "$tmp_work_base" "$workdir/checkpoints"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+cp -a "$source_dir"/. "$workdir/checkpoints"/
+export ACT_DATA_DIR="$workdir/unused_dataset"
+export ACT_NUM_EPISODES=10
+export ACT_CAMERA_NAMES="$camera_names"
+cd "$repo_stage_dir"
+
+for epoch in 500 1000 1500 2000; do
+  output_dir="$workdir/epoch_$epoch"
+  mkdir -p "$output_dir"
+  "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+    --ckpt_dir "$workdir/checkpoints" --eval_ckpt "policy_epoch_${epoch}_seed_0.ckpt" \
+    --eval_output_dir "$output_dir" --visual_condition clean --num_rollouts 50 \
+    --eval_seed 1000 --eval_initial_states "$manifest" \
+    --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 \
+    --batch_size 8 --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed 0 \
+    | tee "$workdir/eval_epoch_${epoch}.log"
+done
+
+echo "[INFO] paired pilot clean evaluation completed: $model_name"

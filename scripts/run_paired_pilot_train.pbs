@@ -1,0 +1,49 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=06:00:00
+#PBS -N act_pair_train
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_train_${model_name}_${safe_job_tag}_XXXXXX")"
+result_dir="$submit_dir/results/act/paired_pilot/$model_name/train_seed0"
+archive="$submit_dir/archives/datasets/act_sim_insertion_scripted_top_side_seed0_10episodes.zip"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir/checkpoints" "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+test -s "$archive"
+mkdir -p "$tmp_work_base"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/dataset"
+export ACT_NUM_EPISODES=10
+export ACT_CAMERA_NAMES="$camera_names"
+mkdir -p "$ACT_DATA_DIR" "$workdir/checkpoints"
+unzip -q "$archive" -d "$ACT_DATA_DIR"
+cd "$repo_stage_dir"
+
+"$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --policy_class ACT --kl_weight 10 \
+  --chunk_size 100 --hidden_dim 512 --batch_size 8 --dim_feedforward 3200 \
+  --num_epochs 2000 --lr 1e-5 --seed 0 --save_every 500 --split_seed 1 \
+  --train_episode_ids 2,9,6,4,0,3,1,7 --val_episode_ids 8,5 \
+  | tee "$workdir/train.log"
+
+echo "[INFO] paired pilot training completed: $model_name ($camera_names)"

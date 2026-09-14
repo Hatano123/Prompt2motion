@@ -1,0 +1,49 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:mem=32gb
+#PBS -l walltime=03:00:00
+#PBS -N act_pair_data
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_data_${safe_job_tag}_XXXXXX")"
+archive="$submit_dir/archives/datasets/act_sim_insertion_scripted_top_side_seed0_10episodes.zip"
+result_dir="$submit_dir/results/act/paired_dataset_${safe_job_tag}"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+mkdir -p "$tmp_work_base" "$submit_dir/archives/datasets" "$submit_dir/archives/environments"
+source "$submit_dir/scripts/act_runtime.sh"
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/dataset"
+export ACT_NUM_EPISODES=10
+export ACT_CAMERA_NAMES="top,side"
+mkdir -p "$ACT_DATA_DIR/sim_insertion_scripted"
+cd "$repo_stage_dir"
+
+"$act_python" record_sim_episodes.py --task_name sim_insertion_scripted \
+  --dataset_dir "$ACT_DATA_DIR/sim_insertion_scripted" --num_episodes 10 --seed 0 \
+  | tee "$workdir/record.log"
+
+temporary_archive="${archive}.tmp.zip"
+(cd "$ACT_DATA_DIR" && zip -q -r "$temporary_archive" sim_insertion_scripted)
+mv "$temporary_archive" "$archive"
+sha256sum "$archive" | tee "$workdir/dataset_sha256.log"
+python3 "$submit_dir/scripts/generate_insertion_eval_manifest.py" \
+  --output "$submit_dir/archives/environments/sim_insertion_eval_seed1000_50.json" \
+  --seed 1000 --count 50
+
+echo "[INFO] paired top+side dataset and evaluation manifest created"
