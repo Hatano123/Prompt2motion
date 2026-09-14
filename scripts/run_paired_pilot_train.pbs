@@ -36,7 +36,8 @@ export ACT_DATA_DIR="$workdir/dataset"
 export ACT_NUM_EPISODES=10
 export ACT_CAMERA_NAMES="$camera_names"
 mkdir -p "$ACT_DATA_DIR" "$workdir/checkpoints"
-unzip -q "$archive" -d "$ACT_DATA_DIR"
+"$act_python" "$submit_dir/scripts/extract_archive.py" \
+  --archive "$archive" --destination "$ACT_DATA_DIR"
 cd "$repo_stage_dir"
 
 "$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
