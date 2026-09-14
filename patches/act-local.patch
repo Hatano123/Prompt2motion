@@ -149,7 +149,7 @@ index 01df233..3f965ff 100644
          obs['images']['vis'] = physics.render(height=480, width=640, camera_id='front_close')
          # used in scripted policy to obtain starting pose
 diff --git a/imitate_episodes.py b/imitate_episodes.py
-index 34f9a37..228196a 100644
+index 34f9a37..3c93110 100644
 --- a/imitate_episodes.py
 +++ b/imitate_episodes.py
 @@ -3,8 +3,9 @@ import numpy as np
@@ -171,7 +171,7 @@ index 34f9a37..228196a 100644
 
  import IPython
  e = IPython.embed
-@@ -84,12 +86,23 @@ def main(args):
+@@ -84,15 +86,27 @@ def main(args):
          'task_name': task_name,
          'seed': args['seed'],
          'temporal_agg': args['temporal_agg'],
@@ -187,6 +187,7 @@ index 34f9a37..228196a 100644
 +        'corruption_camera': args['corruption_camera'],
 +        'occlusion_area_fraction': args['occlusion_area_fraction'],
 +        'occlusion_seed': args['occlusion_seed'],
++        'save_episodes': args['save_episodes'],
          'real_robot': not is_sim
      }
 
@@ -195,8 +196,12 @@ index 34f9a37..228196a 100644
 +        ckpt_names = [args['eval_ckpt']]
          results = []
          for ckpt_name in ckpt_names:
-             success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=True)
-@@ -100,7 +113,12 @@ def main(args):
+-            success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=True)
++            success_rate, avg_return = eval_bc(config, ckpt_name, save_episode=args['save_episodes'])
+             results.append([ckpt_name, success_rate, avg_return])
+
+         for ckpt_name, success_rate, avg_return in results:
+@@ -100,7 +114,12 @@ def main(args):
          print()
          exit()
 
@@ -210,7 +215,7 @@ index 34f9a37..228196a 100644
 
      # save dataset stats
      if not os.path.isdir(ckpt_dir):
-@@ -109,12 +127,7 @@ def main(args):
+@@ -109,12 +128,7 @@ def main(args):
      with open(stats_path, 'wb') as f:
          pickle.dump(stats, f)
 
@@ -224,7 +229,7 @@ index 34f9a37..228196a 100644
      print(f'Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}')
 
 
-@@ -138,10 +151,19 @@ def make_optimizer(policy_class, policy):
+@@ -138,10 +152,19 @@ def make_optimizer(policy_class, policy):
      return optimizer
 
 
@@ -246,7 +251,7 @@ index 34f9a37..228196a 100644
          curr_images.append(curr_image)
      curr_image = np.stack(curr_images, axis=0)
      curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
-@@ -149,8 +171,11 @@ def get_image(ts, camera_names):
+@@ -149,8 +172,11 @@ def get_image(ts, camera_names):
 
 
  def eval_bc(config, ckpt_name, save_episode=True):
@@ -259,7 +264,7 @@ index 34f9a37..228196a 100644
      state_dim = config['state_dim']
      real_robot = config['real_robot']
      policy_class = config['policy_class']
-@@ -195,16 +220,51 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -195,16 +221,51 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
      max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
 
@@ -316,7 +321,7 @@ index 34f9a37..228196a 100644
 
          ts = env.reset()
 
-@@ -241,7 +301,8 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -241,7 +302,8 @@ def eval_bc(config, ckpt_name, save_episode=True):
                  qpos = pre_process(qpos_numpy)
                  qpos = torch.from_numpy(qpos).float().cuda().unsqueeze(0)
                  qpos_history[:, t] = qpos
@@ -326,7 +331,7 @@ index 34f9a37..228196a 100644
 
                  ### query policy
                  if config['policy_class'] == "ACT":
-@@ -290,7 +351,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -290,7 +352,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
          print(f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}')
 
          if save_episode:
@@ -335,7 +340,7 @@ index 34f9a37..228196a 100644
 
      success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
      avg_return = np.mean(episode_returns)
-@@ -304,12 +365,30 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -304,12 +366,30 @@ def eval_bc(config, ckpt_name, save_episode=True):
 
      # save success rate to txt
      result_file_name = 'result_' + ckpt_name.split('.')[0] + '.txt'
@@ -367,7 +372,7 @@ index 34f9a37..228196a 100644
      return success_rate, avg_return
 
 
-@@ -319,12 +398,44 @@ def forward_pass(data, policy):
+@@ -319,12 +399,44 @@ def forward_pass(data, policy):
      return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
 
 
@@ -412,7 +417,7 @@ index 34f9a37..228196a 100644
 
      set_seed(seed)
 
-@@ -335,8 +446,44 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -335,8 +447,44 @@ def train_bc(train_dataloader, val_dataloader, config):
      train_history = []
      validation_history = []
      min_val_loss = np.inf
@@ -459,7 +464,7 @@ index 34f9a37..228196a 100644
          print(f'\nEpoch {epoch}')
          # validation
          with torch.inference_mode():
-@@ -346,16 +493,17 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -346,16 +494,17 @@ def train_bc(train_dataloader, val_dataloader, config):
                  forward_dict = forward_pass(data, policy)
                  epoch_dicts.append(forward_dict)
              epoch_summary = compute_dict_mean(epoch_dicts)
@@ -481,7 +486,7 @@ index 34f9a37..228196a 100644
          print(summary_string)
 
          # training
-@@ -368,32 +516,52 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -368,32 +517,52 @@ def train_bc(train_dataloader, val_dataloader, config):
              loss.backward()
              optimizer.step()
              optimizer.zero_grad()
@@ -552,7 +557,7 @@ index 34f9a37..228196a 100644
 
 
  def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
-@@ -401,8 +569,8 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+@@ -401,8 +570,8 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
      for key in train_history[0]:
          plot_path = os.path.join(ckpt_dir, f'train_val_{key}_seed_{seed}.png')
          plt.figure()
@@ -563,7 +568,7 @@ index 34f9a37..228196a 100644
          plt.plot(np.linspace(0, num_epochs-1, len(train_history)), train_values, label='train')
          plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
          # plt.ylim([-0.1, 1])
-@@ -410,6 +578,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+@@ -410,6 +579,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
          plt.legend()
          plt.title(key)
          plt.savefig(plot_path)
@@ -571,7 +576,7 @@ index 34f9a37..228196a 100644
      print(f'Saved plots to {ckpt_dir}')
 
 
-@@ -424,6 +593,29 @@ if __name__ == '__main__':
+@@ -424,6 +594,32 @@ if __name__ == '__main__':
      parser.add_argument('--seed', action='store', type=int, help='seed', required=True)
      parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
      parser.add_argument('--lr', action='store', type=float, help='lr', required=True)
@@ -589,6 +594,9 @@ index 34f9a37..228196a 100644
 +    parser.add_argument('--corruption_camera', choices=['top', 'side'], default='top')
 +    parser.add_argument('--occlusion_area_fraction', type=float, default=0.25)
 +    parser.add_argument('--occlusion_seed', type=int, default=2000)
++    parser.add_argument('--no_save_episodes', action='store_false', dest='save_episodes',
++                        help='Do not write rollout videos (metrics are still saved)')
++    parser.set_defaults(save_episodes=True)
 +    parser.add_argument('--split_seed', type=int, default=1)
 +    parser.add_argument('--train_episode_ids', type=str, default=None)
 +    parser.add_argument('--val_episode_ids', type=str, default=None)
@@ -601,7 +609,7 @@ index 34f9a37..228196a 100644
 
      # for ACT
      parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
-@@ -431,5 +623,5 @@ if __name__ == '__main__':
+@@ -431,5 +627,5 @@ if __name__ == '__main__':
      parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
      parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
      parser.add_argument('--temporal_agg', action='store_true')

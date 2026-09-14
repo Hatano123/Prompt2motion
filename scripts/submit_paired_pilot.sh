@@ -20,6 +20,5 @@ for spec in 'single_top:top' 'single_side:side' 'multi:top,side'; do
   else
     train_job="$(qsub -v MODEL_NAME,CAMERA_NAMES scripts/run_paired_pilot_train.pbs)"
   fi
-  eval_job="$(qsub -W depend="afterok:$train_job" -v MODEL_NAME,CAMERA_NAMES scripts/run_paired_pilot_eval.pbs)"
-  echo "$model_name train=$train_job eval=$eval_job"
+  echo "$model_name train_and_clean_eval=$train_job"
 done
