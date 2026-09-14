@@ -49,6 +49,8 @@ prepare_act_runtime() {
 
     "$act_python" -m pip install --no-cache-dir -r "$submit_dir/requirements-act.txt"
     if [[ "$runtime_mode" == "cpu" ]]; then
+        "$act_python" -m pip install --no-cache-dir torch==2.8.0 \
+            --index-url https://download.pytorch.org/whl/cpu
         echo "[INFO] prepared CPU-only ACT data runtime"
         return 0
     fi

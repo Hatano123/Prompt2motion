@@ -28,6 +28,9 @@ trap cleanup EXIT
 mkdir -p "$tmp_work_base" "$submit_dir/archives/datasets" "$submit_dir/archives/environments"
 source "$submit_dir/scripts/act_runtime.sh"
 prepare_act_runtime cpu
+cd "$submit_dir"
+"$act_python" -m unittest -v tests/test_experiment_reproducibility.py \
+  | tee "$workdir/cpu_tests.log"
 export ACT_DATA_DIR="$workdir/dataset"
 export ACT_NUM_EPISODES=10
 export ACT_CAMERA_NAMES="top,side"
