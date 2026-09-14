@@ -1,0 +1,26 @@
+model: Single-view ACT
+task: sim_insertion_scripted
+demonstrations: 10
+train_episodes: 8
+validation_episodes: 2
+split_seed: 1
+training_seed: 0
+epochs: 100
+batch_size: 1
+learning_rate: 1.0e-5
+cameras: [top]
+act:
+  backbone: resnet18
+  encoder_layers: 4
+  decoder_layers: 7
+  attention_heads: 8
+  hidden_dimension: 512
+  feedforward_dimension: 3200
+  chunk_size: 100
+  kl_weight: 10
+  temporal_aggregation: false
+evaluation:
+  condition: clean
+  rollouts: 20
+  initial_condition_seed: 1000
+  checkpoint: policy_last.ckpt

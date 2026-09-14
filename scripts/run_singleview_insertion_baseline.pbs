@@ -1,0 +1,84 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=04:00:00
+#PBS -N act_sv_ins10
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+result_dir="$submit_dir/results/act/singleview_insertion_10demo_seed0_${safe_job_tag}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_sv_${safe_job_tag}_XXXXXX")"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir/checkpoints" "$workdir/eval_clean" "$workdir"/*.log "$workdir/results.csv" "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+
+export ACT_DATA_DIR="$workdir/dataset"
+export ACT_NUM_EPISODES=10
+export ACT_CAMERA_NAMES="top"
+mkdir -p "$ACT_DATA_DIR/sim_insertion_scripted" "$workdir/checkpoints" "$workdir/eval_clean"
+cd "$repo_stage_dir"
+
+"$act_python" record_sim_episodes.py --task_name sim_insertion_scripted \
+  --dataset_dir "$ACT_DATA_DIR/sim_insertion_scripted" --num_episodes 10 \
+  | tee "$workdir/record.log"
+
+"$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --policy_class ACT --kl_weight 10 \
+  --chunk_size 100 --hidden_dim 512 --batch_size 1 --dim_feedforward 3200 \
+  --num_epochs 100 --lr 1e-5 --seed 0 --save_every 25 \
+  | tee "$workdir/train.log"
+
+"$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --eval_ckpt policy_last.ckpt \
+  --eval_output_dir "$workdir/eval_clean" --visual_condition clean \
+  --num_rollouts 20 --policy_class ACT --kl_weight 10 --chunk_size 100 \
+  --hidden_dim 512 --batch_size 1 --dim_feedforward 3200 \
+  --num_epochs 100 --lr 1e-5 --seed 0
+
+export ROLLOUT_METRICS="$workdir/eval_clean/rollouts_policy_last.jsonl"
+export RESULTS_CSV="$workdir/results.csv"
+"$act_python" - <<'PY_RESULTS'
+import csv
+import json
+import os
+
+with open(os.environ['ROLLOUT_METRICS']) as source:
+    rows = [json.loads(line) for line in source if line.strip()]
+
+successes = sum(row['success'] for row in rows)
+average_return = sum(row['episode_return'] for row in rows) / len(rows)
+with open(os.environ['RESULTS_CSV'], 'w', newline='') as target:
+    writer = csv.DictWriter(target, fieldnames=[
+        'model', 'task', 'demonstrations', 'train_episodes', 'validation_episodes',
+        'training_seed', 'split_seed', 'epochs', 'batch_size', 'learning_rate',
+        'camera_names', 'evaluation_condition', 'evaluation_seed', 'rollouts',
+        'successes', 'success_rate', 'average_return', 'checkpoint'])
+    writer.writeheader()
+    writer.writerow({
+        'model': 'Single-view', 'task': 'sim_insertion_scripted',
+        'demonstrations': 10, 'train_episodes': 8, 'validation_episodes': 2,
+        'training_seed': 0, 'split_seed': 1, 'epochs': 100, 'batch_size': 1,
+        'learning_rate': '1e-5', 'camera_names': 'top',
+        'evaluation_condition': 'clean', 'evaluation_seed': 1000,
+        'rollouts': len(rows), 'successes': successes,
+        'success_rate': successes / len(rows), 'average_return': average_return,
+        'checkpoint': 'policy_last.ckpt'})
+PY_RESULTS
+
+echo "[INFO] Single-view insertion baseline completed"

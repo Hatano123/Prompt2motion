@@ -1,0 +1,22 @@
+task: sim_insertion_scripted
+seed: 0
+demonstrations: 2
+cameras:
+  top:
+    enabled: true
+    position: [0.0, 0.6, 0.8]
+    target: table
+    fovy: 78
+  side:
+    enabled: true
+    position: [0.0, 0.0, 0.6]
+    target: table
+    fovy: 78
+occlusion:
+  camera: top
+  mode: fixed_center_rectangle
+  x_fraction: [0.25, 0.75]
+  y_fraction: [0.25, 0.75]
+camera_missing:
+  camera: top
+  fill: zeros

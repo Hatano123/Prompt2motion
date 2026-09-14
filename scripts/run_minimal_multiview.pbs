@@ -1,0 +1,59 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=04:00:00
+#PBS -N act_mv_min
+
+set -euo pipefail
+
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+result_dir="$submit_dir/results/act/minimal_multiview_${safe_job_tag}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_mv_${safe_job_tag}_XXXXXX")"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir/checkpoints" "$workdir"/eval_* "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+
+export ACT_DATA_DIR="$workdir/dataset"
+export ACT_NUM_EPISODES="${TRAIN_EPISODES:-2}"
+export ACT_CAMERA_NAMES="top,side"
+save_every="${SAVE_EVERY:-1}"
+mkdir -p "$ACT_DATA_DIR/sim_insertion_scripted" "$workdir/checkpoints"
+cd "$repo_stage_dir"
+
+"$act_python" record_sim_episodes.py --task_name sim_insertion_scripted \
+  --dataset_dir "$ACT_DATA_DIR/sim_insertion_scripted" --num_episodes "$ACT_NUM_EPISODES" \
+  | tee "$workdir/record.log"
+
+"$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --policy_class ACT --kl_weight 10 \
+  --chunk_size 100 --hidden_dim 512 --batch_size 1 --dim_feedforward 3200 \
+  --num_epochs "${TRAIN_EPOCHS:-1}" --lr 1e-5 --seed 0 --save_every "$save_every" \
+  | tee "$workdir/train.log"
+
+for condition in clean occlusion missing; do
+  condition_dir="$workdir/eval_$condition"
+  mkdir -p "$condition_dir"
+  "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+    --ckpt_dir "$workdir/checkpoints" --eval_ckpt policy_last.ckpt \
+    --eval_output_dir "$condition_dir" --visual_condition "$condition" \
+    --num_rollouts "${EVAL_ROLLOUTS:-1}" --policy_class ACT --kl_weight 10 \
+    --chunk_size 100 --hidden_dim 512 --batch_size 1 --dim_feedforward 3200 \
+    --num_epochs "${TRAIN_EPOCHS:-1}" --lr 1e-5 --seed 0
+done
+
+echo "[INFO] minimal multi-view insertion run completed"
