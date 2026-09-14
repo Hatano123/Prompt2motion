@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -q Eduq
 #PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
-#PBS -l walltime=12:00:00
+#PBS -l walltime=06:00:00
 #PBS -N act_pair_train
 
 set -euo pipefail
