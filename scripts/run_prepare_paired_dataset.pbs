@@ -39,11 +39,11 @@ cd "$repo_stage_dir"
 
 "$act_python" record_sim_episodes.py --task_name sim_insertion_scripted \
   --dataset_dir "$ACT_DATA_DIR/sim_insertion_scripted" --num_episodes 10 --seed 0 \
+  --require_success --max_attempts 100 \
   | tee "$workdir/record.log"
 
-temporary_archive="${archive}.tmp.zip"
-(cd "$ACT_DATA_DIR" && zip -q -r "$temporary_archive" sim_insertion_scripted)
-mv "$temporary_archive" "$archive"
+"$act_python" "$submit_dir/scripts/archive_directory.py" \
+  --source "$ACT_DATA_DIR/sim_insertion_scripted" --output "$archive"
 sha256sum "$archive" | tee "$workdir/dataset_sha256.log"
 python3 "$submit_dir/scripts/generate_insertion_eval_manifest.py" \
   --output "$submit_dir/archives/environments/sim_insertion_eval_seed1000_50.json" \

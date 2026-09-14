@@ -609,7 +609,7 @@ index 34f9a37..228196a 100644
 +
      main(vars(parser.parse_args()))
 diff --git a/record_sim_episodes.py b/record_sim_episodes.py
-index 253fdea..c98e51f 100644
+index 253fdea..ee85191 100644
 --- a/record_sim_episodes.py
 +++ b/record_sim_episodes.py
 @@ -2,6 +2,8 @@ import time
@@ -632,7 +632,38 @@ index 253fdea..c98e51f 100644
      if not os.path.isdir(dataset_dir):
          os.makedirs(dataset_dir, exist_ok=True)
 
-@@ -177,13 +183,24 @@ def main(args):
+@@ -43,8 +49,13 @@ def main(args):
+         raise NotImplementedError
+
+     success = []
+-    for episode_idx in range(num_episodes):
+-        print(f'{episode_idx=}')
++    attempts = 0
++    episode_idx = 0
++    while episode_idx < num_episodes:
++        attempts += 1
++        if attempts > args['max_attempts']:
++            raise RuntimeError(f'Could not collect {num_episodes} episodes in {args["max_attempts"]} attempts')
++        print(f'{episode_idx=}, attempt={attempts}')
+         print('Rollout out EE space scripted policy')
+         # setup the environment
+         env = make_ee_sim_env(task_name)
+@@ -118,6 +129,10 @@ def main(args):
+             print(f"{episode_idx=} Failed")
+
+         plt.close()
++        if args['require_success'] and success[-1] == 0:
++            print(f'Discarding failed replay for episode {episode_idx}\n')
++            success.pop()
++            continue
+
+         """
+         For each timestep:
+@@ -174,16 +189,33 @@ def main(args):
+             for name, array in data_dict.items():
+                 root[name][...] = array
+         print(f'Saving: {time.time() - t0:.1f} secs\n')
++        episode_idx += 1
 
      print(f'Saved to {dataset_dir}')
      print(f'Success: {np.sum(success)} / {len(success)}')
@@ -643,6 +674,8 @@ index 253fdea..c98e51f 100644
 +        'camera_names': camera_names,
 +        'successful_replays': int(np.sum(success)),
 +        'success': [int(value) for value in success],
++        'require_success': bool(args['require_success']),
++        'attempts': attempts,
 +    }
 +    with open(os.path.join(dataset_dir, 'dataset_metadata.json'), 'w') as target:
 +        json.dump(metadata, target, indent=2, sort_keys=True)
@@ -654,6 +687,9 @@ index 253fdea..c98e51f 100644
      parser.add_argument('--dataset_dir', action='store', type=str, help='dataset saving dir', required=True)
      parser.add_argument('--num_episodes', action='store', type=int, help='num_episodes', required=False)
 +    parser.add_argument('--seed', type=int, default=0, help='Demonstration generation seed')
++    parser.add_argument('--require_success', action='store_true',
++                        help='Discard failed replays and retry until num_episodes are saved')
++    parser.add_argument('--max_attempts', type=int, default=100)
      parser.add_argument('--onscreen_render', action='store_true')
 
      main(vars(parser.parse_args()))
