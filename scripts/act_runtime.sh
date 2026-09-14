@@ -16,6 +16,11 @@ normalize_pbs_gpu() {
 }
 
 prepare_act_runtime() {
+    local runtime_mode="${1:-gpu}"
+    if [[ "$runtime_mode" != "gpu" && "$runtime_mode" != "cpu" ]]; then
+        echo "[ERROR] runtime mode must be gpu or cpu: $runtime_mode" >&2
+        return 4
+    fi
     repo_stage_dir="$workdir/repo"
     runtime_tmp="$workdir/tmp"
     mkdir -p "$repo_stage_dir" "$runtime_tmp"
@@ -42,12 +47,16 @@ prepare_act_runtime() {
     export __EGL_VENDOR_LIBRARY_FILENAMES="$MAMBA_ROOT_PREFIX/envs/act/share/glvnd/egl_vendor.d/50_mesa.json"
     export LIBGL_ALWAYS_SOFTWARE=1
 
+    "$act_python" -m pip install --no-cache-dir -r "$submit_dir/requirements-act.txt"
+    if [[ "$runtime_mode" == "cpu" ]]; then
+        echo "[INFO] prepared CPU-only ACT data runtime"
+        return 0
+    fi
+
     "$act_python" -m pip install --no-cache-dir \
         torch==2.8.0 torchvision==0.23.0 \
         --index-url https://download.pytorch.org/whl/rocm6.4
-    "$act_python" -m pip install --no-cache-dir -r "$submit_dir/requirements-act.txt"
     "$act_python" -m pip install --no-cache-dir --no-deps -e "$repo_stage_dir/detr"
-
     "$act_python" - <<'PY_RUNTIME'
 import torch
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
