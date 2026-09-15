@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-paired_pilot_batch1}"
+export BATCH_SIZE="${BATCH_SIZE:-1}"
 
 if [[ ! -s archives/datasets/act_sim_insertion_scripted_top_side_seed0_10episodes.zip ]]; then
   data_job="$(qsub scripts/run_prepare_paired_dataset.pbs)"
@@ -16,9 +18,9 @@ for spec in 'single_top:top' 'single_side:side' 'multi:top,side'; do
   camera_names="${spec#*:}"
   export MODEL_NAME="$model_name" CAMERA_NAMES="$camera_names"
   if [[ -n "$dependency" ]]; then
-    train_job="$(qsub -W depend="$dependency" -v MODEL_NAME,CAMERA_NAMES scripts/run_paired_pilot_train.pbs)"
+    train_job="$(qsub -W depend="$dependency" -v MODEL_NAME,CAMERA_NAMES,EXPERIMENT_NAME,BATCH_SIZE scripts/run_paired_pilot_train.pbs)"
   else
-    train_job="$(qsub -v MODEL_NAME,CAMERA_NAMES scripts/run_paired_pilot_train.pbs)"
+    train_job="$(qsub -v MODEL_NAME,CAMERA_NAMES,EXPERIMENT_NAME,BATCH_SIZE scripts/run_paired_pilot_train.pbs)"
   fi
   echo "$model_name train_and_clean_eval=$train_job"
 done
