@@ -66,7 +66,9 @@ bash scripts/submit_clean50.sh
 ```
 
 データが未作成なら生成ジョブを先行投入し、9学習ジョブと各testジョブを依存関係付きで
-投入する。完了後の集計は次で行う。
+投入する。ホーム容量制約下ではrunを直列実行し、test成功後に評価済みselected
+checkpointを削除する。学習履歴、選択epoch、test結果、動画、hashは保持する。
+完了後の集計は次で行う。
 
 ```bash
 python3 scripts/summarize_clean50.py

@@ -110,10 +110,14 @@ Clean-50については、次の成果物はまだ存在しない。
 
 1. `experiment/clean50-protocol` のHEADと差分を確認する。
 2. PBSの利用可能容量を確認する。非圧縮50デモは概算約36.9 GBとなる。
-3. `bash scripts/submit_clean50.sh`でデータ生成、9学習、9 testを投入する。
+3. `bash scripts/submit_clean50.sh`でデータ生成、9学習、9 testを直列投入する。
 4. 生成ジョブのテスト結果とdataset metadata（50成功、camera順）を確認する。
 5. 全test完了後、`python3 scripts/summarize_clean50.py`を実行する。
 6. 仕様書§5の40%ゲートに従い、頑健性評価へ進むか判断する。
+
+容量確認（2026-09-19）ではhome空き約5 GB、ユーザー用共有work領域は未割当だった。
+このため、圧縮dataset archiveはhomeに保持し、各runのtest成功後に評価済みselected
+checkpointを削除する。再評価には同じ入力hashと設定からの再学習が必要となる。
 
 ## 8. 変更管理
 

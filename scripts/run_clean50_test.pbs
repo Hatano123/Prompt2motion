@@ -29,4 +29,8 @@ cd "$repo_stage_dir"
   --lr 1e-5 --seed "$train_seed" | tee "$workdir/test.log"
 sha256sum "$manifest" > "$workdir/output/test_manifest_sha256.txt"
 touch "$workdir/output/.complete"
+if [[ "${DELETE_POLICY_AFTER_TEST:-0}" == 1 ]]; then
+  rm -f -- "$source_dir/selected_policy.ckpt"
+  echo "[INFO] removed evaluated selected_policy.ckpt to stay within the home quota"
+fi
 echo "[INFO] clean50 held-out test completed: $model_name seed=$train_seed"
