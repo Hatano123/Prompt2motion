@@ -1,0 +1,11 @@
+{
+  "mode": "mock_only",
+  "joint_names": ["left_j1", "left_j2", "left_j3", "left_j4", "left_j5", "left_j6", "left_gripper", "right_j1", "right_j2", "right_j3", "right_j4", "right_j5", "right_j6", "right_gripper"],
+  "cameras": ["top", "side"],
+  "control_hz": 10,
+  "joint_min": [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0],
+  "joint_max": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  "max_step": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.02, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.02],
+  "observation_timeout_s": 0.2,
+  "max_camera_skew_s": 0.03
+}
