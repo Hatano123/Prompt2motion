@@ -1,0 +1,10 @@
+model,training_seed,selected_epoch,successes,rollouts,success_rate,average_return
+single_top,0,2000,3,50,0.06,155.60
+single_top,1,2000,2,50,0.04,64.10
+single_top,2,2000,2,50,0.04,127.66
+single_side,0,2000,1,50,0.02,60.62
+single_side,1,2000,5,50,0.10,121.80
+single_side,2,1500,1,50,0.02,125.40
+multi,0,1500,2,50,0.04,129.72
+multi,1,1000,4,50,0.08,94.56
+multi,2,1500,9,50,0.18,142.14

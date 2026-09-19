@@ -1,0 +1,32 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=05:00:00
+#PBS -N act_clean50_test
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"; camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+train_seed="${TRAIN_SEED:?TRAIN_SEED is required}"; batch_size="${BATCH_SIZE:-8}"
+source_dir="$submit_dir/results/act/clean50/$model_name/train_seed${train_seed}"
+result_dir="$source_dir/eval_test"
+manifest="$submit_dir/archives/environments/sim_insertion_test_seed1200_100.json"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"; mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_clean50_test_${model_name}_${train_seed}_XXXXXX")"
+cleanup() { status=$?; trap - EXIT; mkdir -p "$result_dir"; cp -a "$workdir/output"/. "$result_dir"/ 2>/dev/null || true; cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true; [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"; exit "$status"; }
+trap cleanup EXIT
+test -e "$source_dir/.training_complete"; test -s "$source_dir/selected_policy.ckpt"; test -s "$manifest"
+mkdir -p "$workdir/checkpoints" "$workdir/output"
+cp "$source_dir/selected_policy.ckpt" "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
+source "$submit_dir/scripts/act_runtime.sh"; normalize_pbs_gpu; prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+cd "$repo_stage_dir"
+"$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt --eval_output_dir "$workdir/output" \
+  --visual_condition clean --num_rollouts 100 --eval_seed 1200 --eval_initial_states "$manifest" \
+  --no_save_episodes --save_first_n_episodes 5 --policy_class ACT --kl_weight 10 --chunk_size 100 \
+  --hidden_dim 512 --batch_size "$batch_size" --dim_feedforward 3200 --num_epochs 2000 \
+  --lr 1e-5 --seed "$train_seed" | tee "$workdir/test.log"
+sha256sum "$manifest" > "$workdir/output/test_manifest_sha256.txt"
+touch "$workdir/output/.complete"
+echo "[INFO] clean50 held-out test completed: $model_name seed=$train_seed"

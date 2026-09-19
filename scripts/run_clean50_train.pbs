@@ -1,0 +1,84 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=08:00:00
+#PBS -N act_clean50_train
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+train_seed="${TRAIN_SEED:?TRAIN_SEED is required}"
+batch_size="${BATCH_SIZE:-8}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_clean50_${model_name}_${train_seed}_XXXXXX")"
+result_dir="$submit_dir/results/act/clean50/$model_name/train_seed${train_seed}"
+archive="$submit_dir/archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip"
+manifest="$submit_dir/archives/environments/sim_insertion_validation_seed1100_50.json"
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir/artifacts"/. "$result_dir"/ 2>/dev/null || true
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+test -s "$archive"; test -s "$manifest"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/dataset" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+mkdir -p "$ACT_DATA_DIR" "$workdir/checkpoints" "$workdir/artifacts/eval_validation"
+"$act_python" "$submit_dir/scripts/extract_archive.py" --archive "$archive" --destination "$ACT_DATA_DIR"
+cd "$repo_stage_dir"
+
+train_ids="$(seq -s, 0 39)"; val_ids="$(seq -s, 40 49)"
+"$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --policy_class ACT --kl_weight 10 --chunk_size 100 \
+  --hidden_dim 512 --batch_size "$batch_size" --dim_feedforward 3200 --num_epochs 2000 \
+  --lr 1e-5 --seed "$train_seed" --save_every 500 --split_seed 1 \
+  --train_episode_ids "$train_ids" --val_episode_ids "$val_ids" | tee "$workdir/train.log"
+
+for epoch in 500 1000 1500 2000; do
+  output_dir="$workdir/artifacts/eval_validation/epoch_$epoch"; mkdir -p "$output_dir"
+  "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+    --ckpt_dir "$workdir/checkpoints" --eval_ckpt "policy_epoch_${epoch}_seed_${train_seed}.ckpt" \
+    --eval_output_dir "$output_dir" --visual_condition clean --num_rollouts 50 \
+    --eval_seed 1100 --eval_initial_states "$manifest" --no_save_episodes \
+    --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size "$batch_size" \
+    --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed "$train_seed" \
+    | tee "$workdir/validation_epoch_${epoch}.log"
+done
+
+export CLEAN50_WORKDIR="$workdir" MODEL_NAME="$model_name" CAMERA_NAMES="$camera_names" TRAIN_SEED="$train_seed"
+"$act_python" - <<'PY'
+import hashlib, json, os, shutil
+w=os.environ['CLEAN50_WORKDIR']; seed=os.environ['TRAIN_SEED']; rows=[]
+for epoch in (500,1000,1500,2000):
+ p=os.path.join(w,'artifacts','eval_validation',f'epoch_{epoch}',f'rollouts_policy_epoch_{epoch}_seed_{seed}.jsonl')
+ data=[json.loads(x) for x in open(p) if x.strip()]
+ rows.append({'epoch':epoch,'successes':sum(x['success'] for x in data),'rollouts':len(data),
+              'success_rate':sum(x['success'] for x in data)/len(data),
+              'average_return':sum(x['episode_return'] for x in data)/len(data)})
+selected=max(rows,key=lambda x:(x['success_rate'],x['average_return'],-x['epoch']))
+out={'selection_dataset':'validation','evaluation_seed':1100,'model':os.environ['MODEL_NAME'],
+     'camera_names':os.environ['CAMERA_NAMES'].split(','),'training_seed':int(seed),
+     'results':rows,'selected_epoch':selected['epoch']}
+art=os.path.join(w,'artifacts')
+json.dump(out,open(os.path.join(art,'validation_summary.json'),'w'),indent=2,sort_keys=True)
+shutil.copy2(os.path.join(w,'checkpoints',f"policy_epoch_{selected['epoch']}_seed_{seed}.ckpt"),os.path.join(art,'selected_policy.ckpt'))
+for name in ('metrics.jsonl','split_manifest.json','dataset_stats.pkl'):
+ shutil.copy2(os.path.join(w,'checkpoints',name),art)
+PY
+cd "$submit_dir"
+sha256sum "$archive" "$manifest" > "$workdir/artifacts/input_sha256.txt"
+git rev-parse HEAD > "$workdir/artifacts/code_commit.txt"
+sha256sum repos/act/imitate_episodes.py repos/act/utils.py repos/act/experiment_utils.py \
+  scripts/run_clean50_train.pbs configs/clean50.json > "$workdir/artifacts/source_sha256.txt"
+touch "$workdir/artifacts/.training_complete"
+echo "[INFO] clean50 validation selection completed: $model_name seed=$train_seed"

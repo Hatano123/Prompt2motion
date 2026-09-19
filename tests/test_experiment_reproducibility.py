@@ -23,6 +23,12 @@ class ReproducibilityTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(50, len({tuple(state) for state in first}))
 
+    def test_validation_and_test_states_are_disjoint(self):
+        validation = generate_states(1100, 50)
+        test = generate_states(1200, 100)
+        self.assertFalse({tuple(state) for state in validation} &
+                         {tuple(state) for state in test})
+
     def test_occlusion_area_and_seed(self):
         for fraction in (0.25, 0.5):
             rectangle = sample_occlusion_rectangle(480, 640, fraction, 2007)
@@ -68,6 +74,11 @@ class ReproducibilityTest(unittest.TestCase):
                 split = json.load(source)
             self.assertEqual([0, 1, 2, 3], split['train_episode_ids'])
             self.assertEqual([4], split['val_episode_ids'])
+
+            train_only_stats = get_norm_stats(directory, episode_ids=[0, 1, 2, 3])
+            self.assertTrue(np.allclose(train_only_stats['action_mean'], 1.5))
+            self.assertFalse(np.allclose(train_only_stats['action_mean'],
+                                         get_norm_stats(directory, episode_ids=[0, 1, 2, 3, 4])['action_mean']))
 
 
 if __name__ == '__main__':

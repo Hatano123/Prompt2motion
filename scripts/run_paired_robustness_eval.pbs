@@ -1,0 +1,70 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=06:00:00
+#PBS -N act_pair_robust
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+train_seed="${TRAIN_SEED:?TRAIN_SEED is required}"
+experiment_name="${EXPERIMENT_NAME:-paired_pilot}"
+batch_size="${BATCH_SIZE:-8}"
+source_dir="$submit_dir/results/act/$experiment_name/$model_name/train_seed${train_seed}"
+result_dir="$source_dir/eval_robustness"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_robust_${model_name}_${train_seed}_XXXXXX")"
+
+cleanup() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$result_dir"
+    cp -a "$workdir/output"/. "$result_dir"/ 2>/dev/null || true
+    cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+    [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+    exit "$status"
+}
+trap cleanup EXIT
+
+test -s "$source_dir/selected_policy.ckpt"
+test -s "$source_dir/dataset_stats.pkl"
+mkdir -p "$workdir/checkpoints" "$workdir/output"
+cp "$source_dir/selected_policy.ckpt" "$workdir/checkpoints/"
+cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused_dataset"
+export ACT_NUM_EPISODES=10
+export ACT_CAMERA_NAMES="$camera_names"
+cd "$repo_stage_dir"
+
+if [[ "$camera_names" == *,* ]]; then
+    corruption_cameras=(top side)
+else
+    corruption_cameras=("$camera_names")
+fi
+manifest="$submit_dir/archives/environments/sim_insertion_eval_seed1000_50.json"
+for camera in "${corruption_cameras[@]}"; do
+  for condition in occlusion missing; do
+    output_dir="$workdir/output/${condition}_${camera}"
+    mkdir -p "$output_dir"
+    extra_args=()
+    if [[ "$condition" == occlusion ]]; then
+      extra_args+=(--occlusion_area_fraction 0.25 --occlusion_seed 2000)
+    fi
+    "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+      --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt \
+      --eval_output_dir "$output_dir" --visual_condition "$condition" \
+      --corruption_camera "$camera" "${extra_args[@]}" --num_rollouts 50 \
+      --eval_seed 1000 --eval_initial_states "$manifest" --no_save_episodes \
+      --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 \
+      --batch_size "$batch_size" --dim_feedforward 3200 --num_epochs 2000 \
+      --lr 1e-5 --seed "$train_seed" \
+      | tee "$workdir/${condition}_${camera}.log"
+  done
+done
+touch "$workdir/output/.complete"
+echo "[INFO] robustness evaluation completed: $model_name seed=$train_seed"

@@ -41,7 +41,9 @@ git -C repos/act apply ../../patches/act-local.patch
 git -C repos/act status --short
 ```
 
-最後のコマンドで `.gitignore`、`constants.py`、`detr/main.py`、`imitate_episodes.py` の4ファイルだけが変更済みとして表示されれば想定どおりです。
+最後のコマンドで `.gitignore`、`assets/scene.xml`、`constants.py`、`detr/main.py`、
+`ee_sim_env.py`、`imitate_episodes.py`、`record_sim_episodes.py`、`sim_env.py`、
+`utils.py` が変更済み、`experiment_utils.py` が追加として表示されれば想定どおりです。
 
 ### データセット
 

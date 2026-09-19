@@ -1,0 +1,48 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:mem=32gb
+#PBS -l walltime=08:00:00
+#PBS -N act_clean50_data
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+job_tag="${PBS_JOBID:-manual}"
+safe_job_tag="${job_tag%%.*}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_clean50_data_${safe_job_tag}_XXXXXX")"
+archive="$submit_dir/archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip"
+result_dir="$submit_dir/results/act/clean50_dataset_${safe_job_tag}"
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+mkdir -p "$submit_dir/archives/datasets" "$submit_dir/archives/environments"
+source "$submit_dir/scripts/act_runtime.sh"
+prepare_act_runtime cpu
+cd "$submit_dir"
+"$act_python" -m unittest -v tests/test_experiment_reproducibility.py | tee "$workdir/cpu_tests.log"
+
+export ACT_DATA_DIR="$workdir/dataset" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="top,side"
+mkdir -p "$ACT_DATA_DIR/sim_insertion_scripted"
+cd "$repo_stage_dir"
+"$act_python" record_sim_episodes.py --task_name sim_insertion_scripted \
+  --dataset_dir "$ACT_DATA_DIR/sim_insertion_scripted" --num_episodes 50 --seed 0 \
+  --require_success --max_attempts 500 | tee "$workdir/record.log"
+"$act_python" "$submit_dir/scripts/archive_directory.py" \
+  --source "$ACT_DATA_DIR/sim_insertion_scripted" --output "$archive"
+
+"$act_python" "$submit_dir/scripts/generate_insertion_eval_manifest.py" \
+  --output "$submit_dir/archives/environments/sim_insertion_validation_seed1100_50.json" --seed 1100 --count 50
+"$act_python" "$submit_dir/scripts/generate_insertion_eval_manifest.py" \
+  --output "$submit_dir/archives/environments/sim_insertion_test_seed1200_100.json" --seed 1200 --count 100
+sha256sum "$archive" "$submit_dir/archives/environments/"sim_insertion_{validation_seed1100_50,test_seed1200_100}.json \
+  | tee "$workdir/input_sha256.log"
+echo "[INFO] clean50 dataset and disjoint evaluation manifests created"

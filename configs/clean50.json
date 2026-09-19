@@ -1,0 +1,29 @@
+{
+  "experiment": "clean50",
+  "dataset": {
+    "archive": "archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip",
+    "demonstrations": 50,
+    "generation_seed": 0,
+    "train_episode_ids": "0-39",
+    "validation_episode_ids": "40-49"
+  },
+  "models": {
+    "single_top": ["top"],
+    "single_side": ["side"],
+    "multi": ["top", "side"]
+  },
+  "training_seeds": [0, 1, 2],
+  "checkpoint_epochs": [500, 1000, 1500, 2000],
+  "validation": {
+    "manifest": "archives/environments/sim_insertion_validation_seed1100_50.json",
+    "seed": 1100,
+    "rollouts": 50
+  },
+  "test": {
+    "manifest": "archives/environments/sim_insertion_test_seed1200_100.json",
+    "seed": 1200,
+    "rollouts": 100,
+    "saved_videos": 5
+  },
+  "clean_gate_success_rate": 0.4
+}
