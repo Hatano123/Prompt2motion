@@ -9,7 +9,7 @@
 | 対象プロジェクト | Prompt2Motion / ACT視点比較 |
 | main repository基点 | `9fc3ce7fd6d805249b76b0b371ebeab5c8a93d74` |
 | ACT upstream基点 | `742c753c0d4a5d87076c8f69e5628c79a8cc5488` |
-| 記録時点の状態 | Clean-50実装完了、ジョブ未投入 |
+| 記録時点の状態 | Clean-50投入済み、データ生成実行中 |
 | Git作業ブランチ | `experiment/clean50-protocol` |
 
 現在の実装はGit作業ブランチのHEADと `patches/act-local.patch` を正本とする。
@@ -106,7 +106,28 @@ Clean-50については、次の成果物はまだ存在しない。
 
 `results/act/clean50` 以下の実験成果物数は記録時点で0である。
 
-## 7. 次回再開時の手順
+## 7. PBS投入記録（2026-09-19）
+
+2026-09-19 18:35 JSTにClean-50をEduqへ投入した。home容量制約に対応するため、
+データ生成、各学習、各held-out testを直列依存させている。
+
+| 処理 | Job ID | 投入直後の状態 |
+|---|---|---|
+| 50デモ・manifest生成 | 102886 | Running |
+| single_top seed 0 train / test | 102887 / 102888 | Held（依存待ち） |
+| single_top seed 1 train / test | 102889 / 102890 | Held（依存待ち） |
+| single_top seed 2 train / test | 102891 / 102892 | Held（依存待ち） |
+| single_side seed 0 train / test | 102893 / 102894 | Held（依存待ち） |
+| single_side seed 1 train / test | 102895 / 102896 | Held（依存待ち） |
+| single_side seed 2 train / test | 102897 / 102898 | Held（依存待ち） |
+| multi seed 0 train / test | 102899 / 102900 | Held（依存待ち） |
+| multi seed 1 train / test | 102901 / 102902 | Held（依存待ち） |
+| multi seed 2 train / test | 102903 / 102904 | Held（依存待ち） |
+
+投入時に先頭job `102886` が実行開始し、`102887` が `afterok:102886`、末尾test
+`102904` が `afterok:102903` で保持されていることを確認した。
+
+## 8. 次回再開時の手順
 
 1. `experiment/clean50-protocol` のHEADと差分を確認する。
 2. PBSの利用可能容量を確認する。非圧縮50デモは概算約36.9 GBとなる。
@@ -119,7 +140,7 @@ Clean-50については、次の成果物はまだ存在しない。
 このため、圧縮dataset archiveはhomeに保持し、各runのtest成功後に評価済みselected
 checkpointを削除する。再評価には同じ入力hashと設定からの再学習が必要となる。
 
-## 8. 変更管理
+## 9. 変更管理
 
 この文書は事実のスナップショットであり、実験条件の正本は
 [EXPERIMENT_SPEC_CLEAN50.md](EXPERIMENT_SPEC_CLEAN50.md) とする。条件変更時は先に仕様書を
