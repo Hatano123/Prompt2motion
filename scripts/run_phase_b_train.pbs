@@ -1,0 +1,135 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=08:00:00
+#PBS -N act_phase_b
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
+train_seed="${TRAIN_SEED:-0}"
+smoke_mode="${SMOKE_MODE:-0}"
+batch_size=8
+archive="$submit_dir/archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip"
+
+case "$model_name:$camera_names" in
+  single_top:top|single_side:side|multi:top,side) ;;
+  *) echo "[ERROR] invalid model/camera pairing: $model_name:$camera_names" >&2; exit 4 ;;
+esac
+case "$demo_count" in 5|10|25) ;; *) echo "[ERROR] DEMO_COUNT must be 5, 10, or 25" >&2; exit 4 ;; esac
+[[ "$train_seed" == 0 ]] || { echo "[ERROR] Phase B stage is seed 0 only" >&2; exit 4; }
+
+if [[ "$smoke_mode" == 1 ]]; then
+  target_steps=2
+  validate_every_steps=1
+  save_every_steps=1
+  result_dir="$submit_dir/results/act/phase_b_smoke/${demo_count}demos/$model_name/train_seed${train_seed}"
+else
+  target_steps=10000
+  validate_every_steps=5
+  save_every_steps=2500
+  result_dir="$submit_dir/results/act/phase_b/${demo_count}demos/$model_name/train_seed${train_seed}"
+fi
+
+test -s "$archive"
+if [[ -e "$result_dir/.training_complete" ]]; then
+  echo "[ERROR] completed result already exists: $result_dir" >&2
+  exit 5
+fi
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_phase_b_${demo_count}_${model_name}_${train_seed}_XXXXXX")"
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir/artifacts"/. "$result_dir"/ 2>/dev/null || true
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/dataset" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+mkdir -p "$ACT_DATA_DIR" "$workdir/checkpoints" "$workdir/artifacts"
+"$act_python" "$submit_dir/scripts/extract_archive.py" --archive "$archive" --destination "$ACT_DATA_DIR"
+
+train_ids="$(seq -s, 0 $((demo_count - 1)))"
+val_ids="$(seq -s, 40 49)"
+printf '%s\n' "$train_ids" > "$workdir/artifacts/train_episode_ids.txt"
+printf '%s\n' "$val_ids" > "$workdir/artifacts/validation_episode_ids.txt"
+printf '%s\n' "$camera_names" > "$workdir/artifacts/camera_order.txt"
+
+cd "$repo_stage_dir"
+"$act_python" imitate_episodes.py --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --policy_class ACT --kl_weight 10 --chunk_size 100 \
+  --hidden_dim 512 --batch_size "$batch_size" --dim_feedforward 3200 --num_epochs 2000 \
+  --lr 1e-5 --seed "$train_seed" --save_every 500 --split_seed 1 \
+  --train_episode_ids "$train_ids" --val_episode_ids "$val_ids" \
+  --max_train_steps "$target_steps" --validate_every_steps "$validate_every_steps" \
+  --save_every_steps "$save_every_steps" | tee "$workdir/train.log"
+
+export PHASE_B_WORKDIR="$workdir" PHASE_B_DEMOS="$demo_count" PHASE_B_MODEL="$model_name"
+export PHASE_B_CAMERAS="$camera_names" PHASE_B_SMOKE="$smoke_mode"
+"$act_python" - <<'PY'
+import hashlib, json, math, os, pathlib, shutil
+w=pathlib.Path(os.environ['PHASE_B_WORKDIR']); c=w/'checkpoints'; a=w/'artifacts'
+demos=int(os.environ['PHASE_B_DEMOS']); smoke=os.environ['PHASE_B_SMOKE']=='1'
+resolved=json.loads((c/'resolved_config.json').read_text())
+summary=json.loads((c/'training_summary.json').read_text())
+expected_steps=2 if smoke else 10000
+assert resolved['train_episode_ids_resolved']==list(range(demos))
+assert resolved['val_episode_ids_resolved']==list(range(40,50))
+assert resolved['policy_config']['camera_names']==os.environ['PHASE_B_CAMERAS'].split(',')
+assert summary['optimizer_steps']==expected_steps==summary['target_optimizer_steps']
+assert summary['sampled_episode_starts']==expected_steps*8
+assert summary['validation_interval_optimizer_steps']==(1 if smoke else 5)
+assert summary['checkpoint_optimizer_steps']==([1,2] if smoke else [2500,5000,7500,10000])
+metrics=[json.loads(line) for line in (c/'metrics.jsonl').read_text().splitlines()]
+assert len(metrics)==expected_steps and metrics[-1]['optimizer_step']==expected_steps
+for row in metrics:
+ for group in ('train','validation_before_step'):
+  if row[group] is not None:
+   assert all(math.isfinite(float(value)) for value in row[group].values())
+checkpoints=sorted(c.glob('policy_epoch_*_seed_0.ckpt'))
+assert len(checkpoints)==2 if smoke else len(checkpoints)==4
+checkpoint_rows=[]
+for path in checkpoints:
+ digest=hashlib.sha256(path.read_bytes()).hexdigest()
+ checkpoint_rows.append({'name':path.name,'bytes':path.stat().st_size,'sha256':digest})
+json.dump({'checkpoints':checkpoint_rows},open(a/'checkpoint_manifest.json','w'),indent=2,sort_keys=True)
+for name in ('metrics.jsonl','split_manifest.json','dataset_stats.pkl','resolved_config.json','training_summary.json'):
+ shutil.copy2(c/name,a/name)
+for plot in c.glob('train_val_*.png'):
+ shutil.copy2(plot,a/plot.name)
+if not smoke:
+ for path in checkpoints:
+  shutil.copy2(path,a/path.name)
+(a/'smoke_validation.json' if smoke else a/'training_validation.json').write_text(json.dumps({
+ 'valid':True,'optimizer_steps':expected_steps,'parameter_count':resolved['parameter_count'],
+ 'train_episode_ids':resolved['train_episode_ids_resolved'],
+ 'validation_episode_ids':resolved['val_episode_ids_resolved'],
+ 'camera_names':resolved['policy_config']['camera_names'],
+ 'nan_or_inf':False,'checkpoints_verified':checkpoint_rows,
+},indent=2,sort_keys=True)+'\n')
+PY
+
+cd "$submit_dir"
+cp "$workdir/train.log" "$workdir/artifacts/train.log"
+sha256sum "$archive" > "$workdir/artifacts/input_sha256.txt"
+git rev-parse HEAD > "$workdir/artifacts/code_commit.txt"
+git status --porcelain > "$workdir/artifacts/git_status_porcelain.txt"
+git diff > "$workdir/artifacts/dirty_worktree.diff"
+git -C repos/act rev-parse HEAD > "$workdir/artifacts/act_code_commit.txt"
+git -C repos/act status --porcelain > "$workdir/artifacts/act_git_status_porcelain.txt"
+git -C repos/act diff > "$workdir/artifacts/act_dirty_worktree.diff"
+sha256sum repos/act/imitate_episodes.py repos/act/utils.py repos/act/policy.py \
+  repos/act/detr/main.py scripts/run_phase_b_train.pbs configs/clean50.json \
+  > "$workdir/artifacts/source_sha256.txt"
+touch "$workdir/artifacts/.training_complete"
+echo "[INFO] Phase B training complete: demos=$demo_count model=$model_name seed=$train_seed smoke=$smoke_mode steps=$target_steps"

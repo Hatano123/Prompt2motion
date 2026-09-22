@@ -148,30 +148,56 @@ index 01df233..3f965ff 100644
          obs['images']['angle'] = physics.render(height=480, width=640, camera_id='angle')
          obs['images']['vis'] = physics.render(height=480, width=640, camera_id='front_close')
          # used in scripted policy to obtain starting pose
+diff --git a/experiment_utils.py b/experiment_utils.py
+new file mode 100644
+index 0000000..c6025d1
+--- /dev/null
++++ b/experiment_utils.py
+@@ -0,0 +1,17 @@
++"""Pure helpers for reproducible paired-view experiments."""
++
++import numpy as np
++
++
++def sample_occlusion_rectangle(height, width, area_fraction, seed):
++    if not 0 < area_fraction < 1:
++        raise ValueError('area_fraction must be between 0 and 1')
++    rng = np.random.RandomState(seed)
++    aspect = np.exp(rng.uniform(np.log(0.5), np.log(2.0)))
++    rectangle_height = min(
++        height, max(1, int(round(np.sqrt(area_fraction * height * width / aspect)))))
++    rectangle_width = min(
++        width, max(1, int(round(area_fraction * height * width / rectangle_height))))
++    y0 = int(rng.randint(0, height - rectangle_height + 1))
++    x0 = int(rng.randint(0, width - rectangle_width + 1))
++    return [y0, y0 + rectangle_height, x0, x0 + rectangle_width]
 diff --git a/imitate_episodes.py b/imitate_episodes.py
-index 34f9a37..488ee0f 100644
+index 34f9a37..3f5da50 100644
 --- a/imitate_episodes.py
 +++ b/imitate_episodes.py
-@@ -3,8 +3,9 @@ import numpy as np
+@@ -3,8 +3,11 @@ import numpy as np
  import os
  import pickle
  import argparse
 +import json
 +import random
++import hashlib
++import time
  import matplotlib.pyplot as plt
 -from copy import deepcopy
  from tqdm import tqdm
  from einops import rearrange
  
-@@ -17,6 +18,7 @@ from policy import ACTPolicy, CNNMLPPolicy
+@@ -17,6 +20,8 @@ from policy import ACTPolicy, CNNMLPPolicy
  from visualize_episodes import save_videos
  
  from sim_env import BOX_POSE
 +from experiment_utils import sample_occlusion_rectangle
++from rollout_logging import make_step_record, save_episode_logs
  
  import IPython
  e = IPython.embed
-@@ -84,15 +86,28 @@ def main(args):
+@@ -84,15 +89,34 @@ def main(args):
          'task_name': task_name,
          'seed': args['seed'],
          'temporal_agg': args['temporal_agg'],
@@ -180,6 +206,9 @@ index 34f9a37..488ee0f 100644
 +        'resume': args['resume'],
 +        'save_every': args['save_every'],
 +        'max_epochs_this_run': args['max_epochs_this_run'],
++        'max_train_steps': args['max_train_steps'],
++        'validate_every_steps': args['validate_every_steps'],
++        'save_every_steps': args['save_every_steps'],
 +        'eval_output_dir': args['eval_output_dir'],
 +        'visual_condition': args['visual_condition'],
 +        'eval_seed': args['eval_seed'],
@@ -189,6 +218,9 @@ index 34f9a37..488ee0f 100644
 +        'occlusion_seed': args['occlusion_seed'],
 +        'save_episodes': args['save_episodes'],
 +        'save_first_n_episodes': args['save_first_n_episodes'],
++        'save_timeseries': args['save_timeseries'],
++        'model_name': args['model_name'],
++        'behavior_trace_dir': args['behavior_trace_dir'],
          'real_robot': not is_sim
      }
  
@@ -202,7 +234,7 @@ index 34f9a37..488ee0f 100644
              results.append([ckpt_name, success_rate, avg_return])
  
          for ckpt_name, success_rate, avg_return in results:
-@@ -100,7 +115,12 @@ def main(args):
+@@ -100,7 +124,32 @@ def main(args):
          print()
          exit()
  
@@ -212,11 +244,31 @@ index 34f9a37..488ee0f 100644
 +    train_dataloader, val_dataloader, stats, _ = load_data(
 +        dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
 +        split_seed=args['split_seed'], train_episode_ids=args['train_episode_ids'],
-+        val_episode_ids=args['val_episode_ids'], split_manifest_path=split_manifest_path)
++        val_episode_ids=args['val_episode_ids'], split_manifest_path=split_manifest_path,
++        train_num_samples=(args['max_train_steps'] * batch_size_train
++                           if args['max_train_steps'] is not None else None))
++    with open(split_manifest_path) as split_manifest_file:
++        split_manifest = json.load(split_manifest_file)
++    config.update({
++        'train_episode_ids_resolved': split_manifest['train_episode_ids'],
++        'val_episode_ids_resolved': split_manifest['val_episode_ids'],
++        'train_dataset_size': len(train_dataloader.dataset),
++        'validation_dataset_size': len(val_dataloader.dataset),
++        'train_dataloader_length': len(train_dataloader),
++        'natural_steps_per_epoch': int(np.ceil(
++            len(train_dataloader.dataset) / batch_size_train)),
++        'validation_steps_per_pass': len(val_dataloader),
++        'batch_size_train': batch_size_train,
++        'batch_size_validation': batch_size_val,
++        'sampler': type(train_dataloader.sampler).__name__,
++        'shuffle': True,
++        'drop_last': bool(train_dataloader.drop_last),
++        'gradient_accumulation_steps': 1,
++    })
  
      # save dataset stats
      if not os.path.isdir(ckpt_dir):
-@@ -109,12 +129,7 @@ def main(args):
+@@ -109,12 +158,7 @@ def main(args):
      with open(stats_path, 'wb') as f:
          pickle.dump(stats, f)
  
@@ -230,7 +282,7 @@ index 34f9a37..488ee0f 100644
      print(f'Best ckpt, val loss {min_val_loss:.6f} @ epoch{best_epoch}')
  
  
-@@ -138,10 +153,19 @@ def make_optimizer(policy_class, policy):
+@@ -138,10 +182,19 @@ def make_optimizer(policy_class, policy):
      return optimizer
  
  
@@ -252,7 +304,7 @@ index 34f9a37..488ee0f 100644
          curr_images.append(curr_image)
      curr_image = np.stack(curr_images, axis=0)
      curr_image = torch.from_numpy(curr_image / 255.0).float().cuda().unsqueeze(0)
-@@ -149,8 +173,11 @@ def get_image(ts, camera_names):
+@@ -149,8 +202,11 @@ def get_image(ts, camera_names):
  
  
  def eval_bc(config, ckpt_name, save_episode=True):
@@ -265,7 +317,27 @@ index 34f9a37..488ee0f 100644
      state_dim = config['state_dim']
      real_robot = config['real_robot']
      policy_class = config['policy_class']
-@@ -195,18 +222,58 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -161,9 +217,19 @@ def eval_bc(config, ckpt_name, save_episode=True):
+     task_name = config['task_name']
+     temporal_agg = config['temporal_agg']
+     onscreen_cam = 'angle'
++    save_timeseries = config.get('save_timeseries', False)
++    if save_timeseries and (real_robot or 'sim_insertion' not in task_name):
++        raise ValueError('--save_timeseries currently supports simulated insertion tasks only')
+ 
+     # load policy and stats
+     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
++    checkpoint_sha256 = None
++    if save_timeseries:
++        checkpoint_digest = hashlib.sha256()
++        with open(ckpt_path, 'rb') as checkpoint_file:
++            for checkpoint_block in iter(lambda: checkpoint_file.read(1024 * 1024), b''):
++                checkpoint_digest.update(checkpoint_block)
++        checkpoint_sha256 = checkpoint_digest.hexdigest()
+     policy = make_policy(policy_class, policy_config)
+     loading_status = policy.load_state_dict(torch.load(ckpt_path))
+     print(loading_status)
+@@ -195,18 +261,67 @@ def eval_bc(config, ckpt_name, save_episode=True):
  
      max_timesteps = int(max_timesteps * 1) # may increase for real-world tasks
  
@@ -279,12 +351,16 @@ index 34f9a37..488ee0f 100644
 +        raise ValueError(f'Corruption camera {corruption_camera!r} is not in {camera_names}')
 +    initial_states_path = config['eval_initial_states']
 +    initial_states = None
++    manifest = None
++    manifest_sha256 = None
 +    if initial_states_path and os.path.exists(initial_states_path):
 +        with open(initial_states_path) as source:
 +            manifest = json.load(source)
 +        if manifest['task_name'] != task_name:
 +            raise ValueError('Evaluation manifest task does not match')
 +        initial_states = [np.asarray(state, dtype=float) for state in manifest['initial_states']]
++        with open(initial_states_path, 'rb') as source:
++            manifest_sha256 = hashlib.sha256(source.read()).hexdigest()
 +        if len(initial_states) < num_rollouts:
 +            raise ValueError('Evaluation manifest has fewer states than requested rollouts')
 +    elif not real_robot:
@@ -301,9 +377,14 @@ index 34f9a37..488ee0f 100644
 +                          target, indent=2, sort_keys=True)
 +                target.write('\n')
 +            os.replace(temporary_path, initial_states_path)
++            manifest = {'task_name': task_name, 'eval_seed': eval_seed,
++                        'initial_states': [state.tolist() for state in initial_states]}
++            with open(initial_states_path, 'rb') as source:
++                manifest_sha256 = hashlib.sha256(source.read()).hexdigest()
      episode_returns = []
      highest_rewards = []
 +    occlusion_rectangles = []
++    detailed_summary_paths = []
      for rollout_id in range(num_rollouts):
          rollout_id += 0
          ### set task
@@ -329,7 +410,15 @@ index 34f9a37..488ee0f 100644
  
          ### onscreen render
          if onscreen_render:
-@@ -233,15 +300,17 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -223,6 +338,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
+         qpos_list = []
+         target_qpos_list = []
+         rewards = []
++        detailed_records = []
+         with torch.inference_mode():
+             for t in range(max_timesteps):
+                 ### update onscreen render and wait for DT
+@@ -233,15 +349,17 @@ def eval_bc(config, ckpt_name, save_episode=True):
  
                  ### process previous timestep to get qpos and image_list
                  obs = ts.observation
@@ -352,18 +441,94 @@ index 34f9a37..488ee0f 100644
  
                  ### query policy
                  if config['policy_class'] == "ACT":
-@@ -289,8 +358,8 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -266,6 +384,7 @@ def eval_bc(config, ckpt_name, save_episode=True):
+ 
+                 ### post-process actions
+                 raw_action = raw_action.squeeze(0).cpu().numpy()
++                policy_raw_action = raw_action.copy()
+                 action = post_process(raw_action)
+                 target_qpos = action
+ 
+@@ -276,6 +395,17 @@ def eval_bc(config, ckpt_name, save_episode=True):
+                 qpos_list.append(qpos_numpy)
+                 target_qpos_list.append(target_qpos)
+                 rewards.append(ts.reward)
++                if save_timeseries:
++                    detailed_records.append(make_step_record(
++                        timestep=t,
++                        reward=ts.reward,
++                        policy_raw_action=policy_raw_action,
++                        action=target_qpos,
++                        observed_qpos=qpos_numpy,
++                        post_step_qpos=np.asarray(ts.observation['qpos']),
++                        env_state=np.asarray(ts.observation['env_state']),
++                        physics=env._physics,
++                    ))
+ 
+             plt.close()
+         if real_robot:
+@@ -289,8 +419,58 @@ def eval_bc(config, ckpt_name, save_episode=True):
          highest_rewards.append(episode_highest_reward)
          print(f'Rollout {rollout_id}\n{episode_return=}, {episode_highest_reward=}, {env_max_reward=}, Success: {episode_highest_reward==env_max_reward}')
  
 -        if save_episode:
 -            save_videos(image_list, DT, video_path=os.path.join(ckpt_dir, f'video{rollout_id}.mp4'))
++        if config.get('behavior_trace_dir'):
++            behavior_trace_dir = config['behavior_trace_dir']
++            os.makedirs(behavior_trace_dir, exist_ok=True)
++            behavior_trace_path = os.path.join(
++                behavior_trace_dir, f'rollout_{rollout_id:03d}_behavior.npz')
++            temporary_trace_path = f'{behavior_trace_path}.tmp'
++            with open(temporary_trace_path, 'wb') as behavior_trace_file:
++                np.savez_compressed(
++                    behavior_trace_file,
++                    timestep=np.arange(len(rewards), dtype=np.int32),
++                    observed_qpos=np.asarray(qpos_list, dtype=np.float32),
++                    action=np.asarray(target_qpos_list, dtype=np.float32),
++                    reward=np.asarray(rewards, dtype=np.float32),
++                    initial_state=np.asarray(initial_states[rollout_id], dtype=np.float64)
++                    if initial_states is not None else np.asarray([], dtype=np.float64),
++                    success=np.asarray(episode_highest_reward == env_max_reward),
++                )
++            os.replace(temporary_trace_path, behavior_trace_path)
++
++        if save_timeseries:
++            detailed_dir = os.path.join(eval_output_dir, 'timeseries')
++            detailed_metadata = {
++                'task_name': task_name,
++                'model': config.get('model_name') or policy_class,
++                'policy_class': policy_class,
++                'view_configuration': list(camera_names),
++                'training_seed': int(config['seed']),
++                'evaluation_seed': int(eval_seed),
++                'test_manifest_path': os.path.abspath(initial_states_path)
++                if initial_states_path else None,
++                'test_manifest_id': manifest_sha256,
++                'test_manifest_eval_seed': manifest.get('eval_seed') if manifest else None,
++                'initial_state': initial_states[rollout_id].tolist()
++                if initial_states is not None else None,
++                'visual_condition': visual_condition,
++                'corruption_camera': corruption_camera if visual_condition != 'clean' else None,
++                'occlusion_area_fraction': config['occlusion_area_fraction']
++                if visual_condition == 'occlusion' else None,
++                'occlusion_rectangle': occlusion_rectangle,
++                'checkpoint_path': os.path.abspath(ckpt_path),
++                'checkpoint_name': ckpt_name,
++                'checkpoint_sha256': checkpoint_sha256,
++                'control_timestep_seconds': float(DT),
++                'quaternion_order': 'wxyz',
++                'contact_source': 'MuJoCo data.contact geom1/geom2 after env.step',
++            }
++            detailed_summary_path, _ = save_episode_logs(
++                detailed_dir, rollout_id, detailed_records, detailed_metadata)
++            detailed_summary_paths.append(detailed_summary_path)
++
 +        if save_this_episode:
 +            save_videos(image_list, DT, video_path=os.path.join(eval_output_dir, f'video{rollout_id}.mp4'))
  
      success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
      avg_return = np.mean(episode_returns)
-@@ -304,12 +373,31 @@ def eval_bc(config, ckpt_name, save_episode=True):
+@@ -304,12 +484,40 @@ def eval_bc(config, ckpt_name, save_episode=True):
  
      # save success rate to txt
      result_file_name = 'result_' + ckpt_name.split('.')[0] + '.txt'
@@ -393,10 +558,19 @@ index 34f9a37..488ee0f 100644
 +                'video': f'video{rollout_id}.mp4' if video_saved else None,
 +            }) + '\n')
 +
++    if save_timeseries:
++        detailed_index_path = os.path.join(eval_output_dir, 'timeseries', 'index.jsonl')
++        temporary_index_path = f'{detailed_index_path}.tmp'
++        with open(temporary_index_path, 'w') as target:
++            for summary_path in detailed_summary_paths:
++                with open(summary_path) as source:
++                    target.write(json.dumps(json.load(source), sort_keys=True) + '\n')
++        os.replace(temporary_index_path, detailed_index_path)
++
      return success_rate, avg_return
  
  
-@@ -319,12 +407,44 @@ def forward_pass(data, policy):
+@@ -319,12 +527,224 @@ def forward_pass(data, policy):
      return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
  
  
@@ -426,7 +600,187 @@ index 34f9a37..488ee0f 100644
 +    torch.cuda.set_rng_state_all(state['torch_cuda'])
 +
 +
++def _write_json_atomic(value, path):
++    temporary_path = f'{path}.tmp'
++    with open(temporary_path, 'w') as target:
++        json.dump(value, target, indent=2, sort_keys=True)
++        target.write('\n')
++    os.replace(temporary_path, path)
++
++
++def _assert_finite_summary(summary, label):
++    for key, value in summary.items():
++        scalar = float(value.item() if hasattr(value, 'item') else value)
++        if not np.isfinite(scalar):
++            raise FloatingPointError(f'{label} {key} is not finite: {scalar}')
++
++
++def train_bc_by_steps(train_dataloader, val_dataloader, config):
++    """Train with an exact optimizer-step and validation/checkpoint schedule.
++
++    This opt-in path leaves the historical epoch-based Clean-50 behavior
++    unchanged.  Phase B uses five optimizer steps as one baseline-equivalent
++    epoch because the 40-demo baseline had len(train_dataloader) == 5.
++    """
++    target_steps = config['max_train_steps']
++    validate_every = config['validate_every_steps']
++    save_every = config['save_every_steps']
++    if target_steps is None or target_steps <= 0:
++        raise ValueError('max_train_steps must be positive in step-controlled mode')
++    if validate_every is None or validate_every <= 0:
++        raise ValueError('validate_every_steps must be positive in step-controlled mode')
++    if save_every is None or save_every <= 0:
++        raise ValueError('save_every_steps must be positive in step-controlled mode')
++    if target_steps % save_every:
++        raise ValueError('max_train_steps must be divisible by save_every_steps')
++    if config['resume']:
++        raise ValueError('step-controlled resume is not implemented; restart the incomplete run')
++
++    ckpt_dir = config['ckpt_dir']
++    seed = config['seed']
++    set_seed(seed)
++    policy = make_policy(config['policy_class'], config['policy_config'])
++    policy.cuda()
++    optimizer = make_optimizer(config['policy_class'], policy)
++    parameter_count = sum(parameter.numel() for parameter in policy.parameters()
++                          if parameter.requires_grad)
++    print(f'Exact trainable parameter count: {parameter_count}')
++
++    started_at = time.time()
++    dataset_size = len(train_dataloader.dataset)
++    resolved = {
++        **{key: value for key, value in config.items()
++           if key not in {'real_robot'}},
++        'training_mode': 'exact_optimizer_steps',
++        'optimizer': type(optimizer).__name__,
++        'scheduler': None,
++        'parameter_count': int(parameter_count),
++        'target_optimizer_steps': int(target_steps),
++        'baseline_equivalent_epochs': target_steps / validate_every,
++        'native_epoch_equivalent': target_steps * config['batch_size_train'] / dataset_size,
++        'checkpoint_optimizer_steps': list(range(save_every, target_steps + 1, save_every)),
++    }
++    _write_json_atomic(resolved, os.path.join(ckpt_dir, 'resolved_config.json'))
++
++    train_history = []
++    validation_history = []
++    min_val_loss = np.inf
++    best_validation_step = None
++    optimizer_step = 0
++    sampled_episode_starts = 0
++    supervised_action_targets = 0
++    train_iterator = iter(train_dataloader)
++    metrics_path = os.path.join(ckpt_dir, 'metrics.jsonl')
++    with open(metrics_path, 'w'):
++        pass
++
++    while optimizer_step < target_steps:
++        validation_summary = None
++        if optimizer_step % validate_every == 0:
++            with torch.inference_mode():
++                policy.eval()
++                validation_batches = []
++                for data in val_dataloader:
++                    validation_batches.append(forward_pass(data, policy))
++                validation_tensor_summary = compute_dict_mean(validation_batches)
++                _assert_finite_summary(validation_tensor_summary, 'validation')
++                validation_summary = _to_cpu_scalars(validation_tensor_summary)
++                validation_history.append(validation_summary)
++                validation_loss = validation_summary['loss']
++                if validation_loss < min_val_loss:
++                    min_val_loss = validation_loss
++                    best_validation_step = optimizer_step
++            print(f'Validation at optimizer step {optimizer_step}: loss={validation_loss:.6f}')
++
++        policy.train()
++        try:
++            data = next(train_iterator)
++        except StopIteration:
++            train_iterator = iter(train_dataloader)
++            data = next(train_iterator)
++        batch_samples = int(data[1].shape[0])
++        sampled_episode_starts += batch_samples
++        supervised_action_targets += int((~data[3][:, :config['policy_config']['num_queries']]).sum())
++
++        forward_dict = forward_pass(data, policy)
++        _assert_finite_summary(forward_dict, 'training')
++        loss = forward_dict['loss']
++        loss.backward()
++        optimizer.step()
++        optimizer.zero_grad()
++        optimizer_step += 1
++        train_summary = _to_cpu_scalars(detach_dict(forward_dict))
++        train_history.append(train_summary)
++
++        with open(metrics_path, 'a') as metrics_file:
++            metrics_file.write(json.dumps({
++                'optimizer_step': optimizer_step,
++                'baseline_epoch_equivalent': optimizer_step / validate_every,
++                'native_epoch_equivalent': sampled_episode_starts / dataset_size,
++                'sampled_episode_starts': sampled_episode_starts,
++                'supervised_action_targets': supervised_action_targets,
++                'train': train_summary,
++                'validation_before_step': validation_summary,
++                'best_validation_step': best_validation_step,
++                'min_val_loss': min_val_loss,
++            }) + '\n')
++
++        if optimizer_step % save_every == 0:
++            baseline_epoch = optimizer_step // validate_every
++            checkpoint_path = os.path.join(
++                ckpt_dir, f'policy_epoch_{baseline_epoch}_seed_{seed}.ckpt')
++            _atomic_torch_save(policy.state_dict(), checkpoint_path)
++            training_state = {
++                'format_version': 2,
++                'training_mode': 'exact_optimizer_steps',
++                'optimizer_step': optimizer_step,
++                'policy': policy.state_dict(),
++                'optimizer': optimizer.state_dict(),
++                'train_history': train_history,
++                'validation_history': validation_history,
++                'min_val_loss': min_val_loss,
++                'best_validation_step': best_validation_step,
++                'sampled_episode_starts': sampled_episode_starts,
++                'supervised_action_targets': supervised_action_targets,
++                'rng_state': _capture_rng_state(),
++                'config': config,
++            }
++            _atomic_torch_save(training_state, os.path.join(ckpt_dir, 'training_state_last.ckpt'))
++            print(f'Saved step-controlled checkpoint: {checkpoint_path}')
++
++    finished_at = time.time()
++    training_summary = {
++        'training_mode': 'exact_optimizer_steps',
++        'optimizer': type(optimizer).__name__,
++        'scheduler': None,
++        'parameter_count': int(parameter_count),
++        'optimizer_steps': optimizer_step,
++        'target_optimizer_steps': target_steps,
++        'sampled_episode_starts': sampled_episode_starts,
++        'supervised_action_targets': supervised_action_targets,
++        'approximate_episode_exposures': sampled_episode_starts / dataset_size,
++        'native_epoch_equivalent': sampled_episode_starts / dataset_size,
++        'baseline_epoch_equivalent': optimizer_step / validate_every,
++        'validation_passes': len(validation_history),
++        'validation_interval_optimizer_steps': validate_every,
++        'checkpoint_interval_optimizer_steps': save_every,
++        'checkpoint_optimizer_steps': list(range(save_every, target_steps + 1, save_every)),
++        'best_validation_step': best_validation_step,
++        'min_val_loss': min_val_loss,
++        'started_unix_seconds': started_at,
++        'finished_unix_seconds': finished_at,
++        'wall_clock_seconds': finished_at - started_at,
++    }
++    _write_json_atomic(training_summary, os.path.join(ckpt_dir, 'training_summary.json'))
++    plot_history(train_history, validation_history,
++                 int(target_steps / validate_every), ckpt_dir, seed)
++    print(f'Step-controlled training finished: {optimizer_step} optimizer steps')
++    return best_validation_step, min_val_loss
++
++
  def train_bc(train_dataloader, val_dataloader, config):
++    if config.get('max_train_steps') is not None:
++        return train_bc_by_steps(train_dataloader, val_dataloader, config)
      num_epochs = config['num_epochs']
      ckpt_dir = config['ckpt_dir']
      seed = config['seed']
@@ -441,7 +795,7 @@ index 34f9a37..488ee0f 100644
  
      set_seed(seed)
  
-@@ -335,8 +455,44 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -335,8 +755,44 @@ def train_bc(train_dataloader, val_dataloader, config):
      train_history = []
      validation_history = []
      min_val_loss = np.inf
@@ -488,7 +842,7 @@ index 34f9a37..488ee0f 100644
          print(f'\nEpoch {epoch}')
          # validation
          with torch.inference_mode():
-@@ -346,16 +502,17 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -346,16 +802,17 @@ def train_bc(train_dataloader, val_dataloader, config):
                  forward_dict = forward_pass(data, policy)
                  epoch_dicts.append(forward_dict)
              epoch_summary = compute_dict_mean(epoch_dicts)
@@ -510,7 +864,7 @@ index 34f9a37..488ee0f 100644
          print(summary_string)
  
          # training
-@@ -368,32 +525,52 @@ def train_bc(train_dataloader, val_dataloader, config):
+@@ -368,32 +825,52 @@ def train_bc(train_dataloader, val_dataloader, config):
              loss.backward()
              optimizer.step()
              optimizer.zero_grad()
@@ -581,7 +935,7 @@ index 34f9a37..488ee0f 100644
  
  
  def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
-@@ -401,8 +578,8 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+@@ -401,8 +878,8 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
      for key in train_history[0]:
          plot_path = os.path.join(ckpt_dir, f'train_val_{key}_seed_{seed}.png')
          plt.figure()
@@ -592,7 +946,7 @@ index 34f9a37..488ee0f 100644
          plt.plot(np.linspace(0, num_epochs-1, len(train_history)), train_values, label='train')
          plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
          # plt.ylim([-0.1, 1])
-@@ -410,6 +587,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
+@@ -410,6 +887,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
          plt.legend()
          plt.title(key)
          plt.savefig(plot_path)
@@ -600,7 +954,7 @@ index 34f9a37..488ee0f 100644
      print(f'Saved plots to {ckpt_dir}')
  
  
-@@ -424,6 +602,34 @@ if __name__ == '__main__':
+@@ -424,6 +902,46 @@ if __name__ == '__main__':
      parser.add_argument('--seed', action='store', type=int, help='seed', required=True)
      parser.add_argument('--num_epochs', action='store', type=int, help='num_epochs', required=True)
      parser.add_argument('--lr', action='store', type=float, help='lr', required=True)
@@ -623,6 +977,12 @@ index 34f9a37..488ee0f 100644
 +    parser.set_defaults(save_episodes=True)
 +    parser.add_argument('--save_first_n_episodes', type=int, default=0,
 +                        help='Save the first N rollout videos even with --no_save_episodes')
++    parser.add_argument('--save_timeseries', action='store_true',
++                        help='Write compressed per-timestep NPZ logs and episode JSON summaries')
++    parser.add_argument('--model_name', type=str, default=None,
++                        help='Model/view label recorded in detailed rollout metadata')
++    parser.add_argument('--behavior_trace_dir', type=str, default=None,
++                        help='Optional lightweight post-episode trace for logging-invariance tests')
 +    parser.add_argument('--split_seed', type=int, default=1)
 +    parser.add_argument('--train_episode_ids', type=str, default=None)
 +    parser.add_argument('--val_episode_ids', type=str, default=None)
@@ -632,10 +992,16 @@ index 34f9a37..488ee0f 100644
 +                        help='Save policy and resumable training state every N epochs')
 +    parser.add_argument('--max_epochs_this_run', type=int, default=None,
 +                        help='Run at most N epochs in this process while keeping num_epochs as the global target')
++    parser.add_argument('--max_train_steps', type=int, default=None,
++                        help='Exact optimizer-step budget; enables step-controlled training mode')
++    parser.add_argument('--validate_every_steps', type=int, default=None,
++                        help='Validation interval for step-controlled training')
++    parser.add_argument('--save_every_steps', type=int, default=None,
++                        help='Checkpoint interval for step-controlled training')
  
      # for ACT
      parser.add_argument('--kl_weight', action='store', type=int, help='KL Weight', required=False)
-@@ -431,5 +637,5 @@ if __name__ == '__main__':
+@@ -431,5 +949,5 @@ if __name__ == '__main__':
      parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
      parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
      parser.add_argument('--temporal_agg', action='store_true')
@@ -728,6 +1094,308 @@ index 253fdea..ee85191 100644
      
      main(vars(parser.parse_args()))
 -
+diff --git a/rollout_logging.py b/rollout_logging.py
+new file mode 100644
+index 0000000..469a822
+--- /dev/null
++++ b/rollout_logging.py
+@@ -0,0 +1,296 @@
++"""Detailed, image-free rollout logging for ACT evaluation.
++
++The logger is intentionally independent of torch and dm_control so its file
++format and validator can be tested without a GPU runtime.  Simulation objects
++are accessed through the small ``physics.data``/``physics.model`` interface.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from typing import Any, Iterable
++
++import numpy as np
++
++
++SCHEMA_VERSION = 1
++SOCKET_GEOMS = frozenset({"socket-1", "socket-2", "socket-3", "socket-4"})
++LEFT_GRIPPER_GEOMS = frozenset({
++    "vx300s_left/10_left_gripper_finger",
++    "vx300s_left/10_right_gripper_finger",
++})
++RIGHT_GRIPPER_GEOMS = frozenset({
++    "vx300s_right/10_left_gripper_finger",
++    "vx300s_right/10_right_gripper_finger",
++})
++
++
++def _unordered_pair_matches(pair: tuple[str | None, str | None],
++                            first: set[str] | frozenset[str],
++                            second: set[str] | frozenset[str]) -> bool:
++    one, two = pair
++    return (one in first and two in second) or (two in first and one in second)
++
++
++def capture_contacts(physics: Any) -> dict[str, Any]:
++    """Copy current MuJoCo contacts without mutating simulation state."""
++    geom1_ids: list[int] = []
++    geom2_ids: list[int] = []
++    pairs: list[tuple[str | None, str | None]] = []
++    for contact_index in range(int(physics.data.ncon)):
++        contact = physics.data.contact[contact_index]
++        geom1 = int(contact.geom1)
++        geom2 = int(contact.geom2)
++        geom1_ids.append(geom1)
++        geom2_ids.append(geom2)
++        pairs.append((
++            physics.model.id2name(geom1, "geom"),
++            physics.model.id2name(geom2, "geom"),
++        ))
++
++    peg = frozenset({"red_peg"})
++    pin = frozenset({"pin"})
++    table = frozenset({"table"})
++    return {
++        "geom1_ids": np.asarray(geom1_ids, dtype=np.int32),
++        "geom2_ids": np.asarray(geom2_ids, dtype=np.int32),
++        "geom1_names": tuple(pair[0] or "" for pair in pairs),
++        "geom2_names": tuple(pair[1] or "" for pair in pairs),
++        "peg_socket": any(_unordered_pair_matches(pair, peg, SOCKET_GEOMS) for pair in pairs),
++        "peg_pin": any(_unordered_pair_matches(pair, peg, pin) for pair in pairs),
++        "right_gripper_peg": any(
++            _unordered_pair_matches(pair, RIGHT_GRIPPER_GEOMS, peg) for pair in pairs),
++        "left_gripper_socket": any(
++            _unordered_pair_matches(pair, LEFT_GRIPPER_GEOMS, SOCKET_GEOMS) for pair in pairs),
++        "peg_table": any(_unordered_pair_matches(pair, peg, table) for pair in pairs),
++        "socket_table": any(
++            _unordered_pair_matches(pair, SOCKET_GEOMS, table) for pair in pairs),
++    }
++
++
++def make_step_record(timestep: int, reward: float, policy_raw_action: np.ndarray,
++                     action: np.ndarray, observed_qpos: np.ndarray,
++                     post_step_qpos: np.ndarray, env_state: np.ndarray,
++                     physics: Any) -> dict[str, Any]:
++    """Build one post-action record for ``sim_insertion_scripted``.
++
++    ``observed_qpos`` is the policy input at t. ``post_step_qpos``, object poses,
++    reward, and contacts are from the TimeStep returned by ``env.step(action)``.
++    MuJoCo free-joint qpos layout is xyz + quaternion wxyz.
++    """
++    observed_qpos = np.asarray(observed_qpos)
++    post_step_qpos = np.asarray(post_step_qpos)
++    env_state = np.asarray(env_state)
++    if observed_qpos.shape != (14,) or post_step_qpos.shape != (14,):
++        raise ValueError("Insertion qpos must have shape (14,)")
++    if env_state.shape != (14,):
++        raise ValueError("Insertion env_state must be peg pose (7) + socket pose (7)")
++    contacts = capture_contacts(physics)
++    return {
++        "timestep": int(timestep),
++        "reward": float(reward),
++        "policy_raw_action": np.asarray(policy_raw_action).copy(),
++        "action": np.asarray(action).copy(),
++        "target_qpos": np.asarray(action).copy(),
++        "observed_qpos": observed_qpos.copy(),
++        "post_step_qpos": post_step_qpos.copy(),
++        "observed_gripper_state": observed_qpos[[6, 13]].copy(),
++        "post_step_gripper_state": post_step_qpos[[6, 13]].copy(),
++        "peg_position": env_state[:3].copy(),
++        "peg_quaternion_wxyz": env_state[3:7].copy(),
++        "socket_position": env_state[7:10].copy(),
++        "socket_quaternion_wxyz": env_state[10:14].copy(),
++        **contacts,
++    }
++
++
++def milestone_timesteps(rewards: Iterable[float], max_reward: int = 4) -> dict[str, int | None]:
++    reward_array = np.asarray(list(rewards), dtype=np.float32)
++    result: dict[str, int | None] = {}
++    for milestone in range(1, max_reward + 1):
++        reached = np.flatnonzero(reward_array >= milestone)
++        result[f"first_reward{milestone}_timestep"] = int(reached[0]) if reached.size else None
++    return result
++
++
++def records_to_arrays(records: list[dict[str, Any]]) -> dict[str, np.ndarray]:
++    if not records:
++        raise ValueError("Cannot save an empty rollout")
++    scalar_float = ("reward",)
++    scalar_int = ("timestep",)
++    vector_float = (
++        "policy_raw_action", "action", "target_qpos", "observed_qpos", "post_step_qpos",
++        "observed_gripper_state", "post_step_gripper_state", "peg_position",
++        "peg_quaternion_wxyz", "socket_position", "socket_quaternion_wxyz",
++    )
++    boolean_fields = (
++        "peg_socket", "peg_pin", "right_gripper_peg", "left_gripper_socket",
++        "peg_table", "socket_table",
++    )
++    arrays: dict[str, np.ndarray] = {}
++    for field in scalar_int:
++        arrays[field] = np.asarray([record[field] for record in records], dtype=np.int32)
++    for field in scalar_float:
++        arrays[field] = np.asarray([record[field] for record in records], dtype=np.float32)
++    for field in vector_float:
++        arrays[field] = np.stack([record[field] for record in records]).astype(np.float32)
++    for field in boolean_fields:
++        arrays[f"contact_{field}"] = np.asarray(
++            [record[field] for record in records], dtype=np.bool_)
++
++    contact_counts = np.asarray([len(record["geom1_ids"]) for record in records], dtype=np.int16)
++    max_contacts = int(contact_counts.max(initial=0))
++    geom1 = np.full((len(records), max_contacts), -1, dtype=np.int32)
++    geom2 = np.full((len(records), max_contacts), -1, dtype=np.int32)
++    max_name_length = max(
++        1,
++        *(len(name) for record in records
++          for field in ("geom1_names", "geom2_names") for name in record[field]),
++    )
++    name_dtype = f"<U{max_name_length}"
++    geom1_names = np.full((len(records), max_contacts), "", dtype=name_dtype)
++    geom2_names = np.full((len(records), max_contacts), "", dtype=name_dtype)
++    for index, record in enumerate(records):
++        count = int(contact_counts[index])
++        geom1[index, :count] = record["geom1_ids"]
++        geom2[index, :count] = record["geom2_ids"]
++        geom1_names[index, :count] = record["geom1_names"]
++        geom2_names[index, :count] = record["geom2_names"]
++    arrays["contact_count"] = contact_counts
++    arrays["contact_geom1_id"] = geom1
++    arrays["contact_geom2_id"] = geom2
++    arrays["contact_geom1_name"] = geom1_names
++    arrays["contact_geom2_name"] = geom2_names
++    return arrays
++
++
++def save_episode_logs(output_dir: str | os.PathLike[str], rollout_id: int,
++                      records: list[dict[str, Any]], metadata: dict[str, Any]) -> tuple[Path, Path]:
++    output = Path(output_dir)
++    output.mkdir(parents=True, exist_ok=True)
++    stem = f"rollout_{rollout_id:03d}"
++    timeseries_path = output / f"{stem}_timeseries.npz"
++    summary_path = output / f"{stem}_summary.json"
++    arrays = records_to_arrays(records)
++    milestones = milestone_timesteps(arrays["reward"])
++    reward3 = milestones["first_reward3_timestep"]
++    reward4 = milestones["first_reward4_timestep"]
++    summary = {
++        "schema_version": SCHEMA_VERSION,
++        **metadata,
++        "rollout_id": int(rollout_id),
++        "state_id": int(rollout_id),
++        "episode_length": len(records),
++        "episode_return": float(arrays["reward"].sum()),
++        "highest_reward": float(arrays["reward"].max()),
++        "success": bool(arrays["reward"].max() >= 4),
++        **milestones,
++        "reward3_remaining_steps": len(records) - 1 - reward3 if reward3 is not None else None,
++        "reward3_to_reward4_steps": reward4 - reward3
++        if reward3 is not None and reward4 is not None else None,
++        "timeseries_file": timeseries_path.name,
++        "array_shapes": {key: list(value.shape) for key, value in arrays.items()},
++        "array_dtypes": {key: str(value.dtype) for key, value in arrays.items()},
++        "action_semantics": {
++            "policy_raw_action": "normalized policy output before dataset-stat post-processing",
++            "action": "absolute 14-D joint/gripper command passed to env.step; identical to target_qpos",
++            "target_qpos": "alias of action, retained for explicit qpos-tracking analysis",
++            "observed_qpos": "pre-action policy observation",
++            "post_step_qpos": "observation returned after applying action",
++            "object_pose": "post-action MuJoCo free-joint qpos; xyz + quaternion wxyz",
++        },
++        "joint_layout": {
++            "left_arm": [0, 6],
++            "left_gripper": 6,
++            "right_arm": [7, 13],
++            "right_gripper": 13,
++        },
++        "contact_array_semantics": (
++            "Each row stores contact_count valid geom pairs; remaining ID entries are -1 "
++            "and remaining name entries are empty strings."
++        ),
++    }
++
++    temporary_npz = timeseries_path.with_suffix(timeseries_path.suffix + ".tmp")
++    with temporary_npz.open("wb") as stream:
++        np.savez_compressed(stream, **arrays)
++    os.replace(temporary_npz, timeseries_path)
++    temporary_json = summary_path.with_suffix(summary_path.suffix + ".tmp")
++    with temporary_json.open("w") as stream:
++        json.dump(summary, stream, indent=2, sort_keys=True)
++        stream.write("\n")
++    os.replace(temporary_json, summary_path)
++    return summary_path, timeseries_path
++
++
++def validate_episode_logs(summary_path: str | os.PathLike[str],
++                          expected_initial_state: np.ndarray | None = None) -> dict[str, Any]:
++    summary_path = Path(summary_path)
++    with summary_path.open() as stream:
++        summary = json.load(stream)
++    timeseries_path = summary_path.parent / summary["timeseries_file"]
++    with np.load(timeseries_path, allow_pickle=False) as archive:
++        arrays = {key: archive[key] for key in archive.files}
++
++    length = int(summary["episode_length"])
++    required_shapes = {
++        "timestep": (length,), "reward": (length,),
++        "policy_raw_action": (length, 14), "action": (length, 14), "target_qpos": (length, 14),
++        "observed_qpos": (length, 14), "post_step_qpos": (length, 14),
++        "observed_gripper_state": (length, 2), "post_step_gripper_state": (length, 2),
++        "peg_position": (length, 3), "peg_quaternion_wxyz": (length, 4),
++        "socket_position": (length, 3), "socket_quaternion_wxyz": (length, 4),
++        "contact_count": (length,),
++    }
++    for contact_field in (
++            "contact_peg_socket", "contact_peg_pin", "contact_right_gripper_peg",
++            "contact_left_gripper_socket", "contact_peg_table", "contact_socket_table"):
++        required_shapes[contact_field] = (length,)
++    errors: list[str] = []
++    for key, expected_shape in required_shapes.items():
++        if key not in arrays:
++            errors.append(f"missing array: {key}")
++        elif arrays[key].shape != expected_shape:
++            errors.append(f"{key} shape {arrays[key].shape} != {expected_shape}")
++    for key, value in arrays.items():
++        if np.issubdtype(value.dtype, np.number) and not np.isfinite(value).all():
++            errors.append(f"{key} contains NaN or Inf")
++    if "timestep" in arrays and not np.array_equal(arrays["timestep"], np.arange(length)):
++        errors.append("timestep is not contiguous from zero")
++    if "action" in arrays and "target_qpos" in arrays and not np.array_equal(
++            arrays["action"], arrays["target_qpos"]):
++        errors.append("action and target_qpos differ")
++    raw_contact_fields = (
++        "contact_geom1_id", "contact_geom2_id", "contact_geom1_name", "contact_geom2_name")
++    if all(field in arrays for field in raw_contact_fields):
++        raw_shapes = {arrays[field].shape for field in raw_contact_fields}
++        if len(raw_shapes) != 1 or next(iter(raw_shapes))[0] != length:
++            errors.append("raw contact arrays do not share shape (episode_length, max_contacts)")
++        elif "contact_count" in arrays:
++            max_contacts = next(iter(raw_shapes))[1]
++            if np.any(arrays["contact_count"] < 0) or np.any(
++                    arrays["contact_count"] > max_contacts):
++                errors.append("contact_count exceeds raw contact array width")
++    if "reward" in arrays:
++        if not np.isclose(arrays["reward"].sum(), summary["episode_return"]):
++            errors.append("episode_return does not match reward sum")
++        if not np.isclose(arrays["reward"].max(), summary["highest_reward"]):
++            errors.append("highest_reward does not match reward maximum")
++        expected_milestones = milestone_timesteps(arrays["reward"])
++        for key, value in expected_milestones.items():
++            if summary.get(key) != value:
++                errors.append(f"{key} does not match reward series")
++    if expected_initial_state is not None and not np.array_equal(
++            np.asarray(summary.get("initial_state")), np.asarray(expected_initial_state)):
++        errors.append("initial_state does not match expected manifest state")
++    if errors:
++        raise ValueError("; ".join(errors))
++    return {
++        "summary": str(summary_path),
++        "timeseries": str(timeseries_path),
++        "episode_length": length,
++        "compressed_bytes": timeseries_path.stat().st_size,
++        "valid": True,
++    }
 diff --git a/sim_env.py b/sim_env.py
 index b79b935..2157cd4 100644
 --- a/sim_env.py
@@ -746,22 +1414,50 @@ index b79b935..2157cd4 100644
      test_sim_teleop()
 -
 diff --git a/utils.py b/utils.py
-index d90b782..99901e3 100644
+index d90b782..6378726 100644
 --- a/utils.py
 +++ b/utils.py
-@@ -2,6 +2,7 @@ import numpy as np
+@@ -2,7 +2,8 @@ import numpy as np
  import torch
  import os
  import h5py
+-from torch.utils.data import TensorDataset, DataLoader
 +import json
- from torch.utils.data import TensorDataset, DataLoader
++from torch.utils.data import TensorDataset, DataLoader, Sampler
  
  import IPython
-@@ -76,10 +77,20 @@ class EpisodicDataset(torch.utils.data.Dataset):
+ e = IPython.embed
+@@ -76,10 +77,46 @@ class EpisodicDataset(torch.utils.data.Dataset):
          return image_data, qpos_data, action_data, is_pad
  
  
 -def get_norm_stats(dataset_dir, num_episodes):
++class CyclingRandomSampler(Sampler):
++    """Concatenate shuffled no-replacement passes to a fixed sample budget.
++
++    Every complete pass contains each dataset index exactly once.  The final
++    pass may be truncated.  This keeps Phase B optimizer batches full while
++    preserving the baseline's shuffle-without-replacement semantics.
++    """
++    def __init__(self, data_source, num_samples):
++        self.data_source = data_source
++        self.num_samples = int(num_samples)
++        if len(data_source) <= 0 or self.num_samples <= 0:
++            raise ValueError('CyclingRandomSampler requires positive lengths')
++
++    def __iter__(self):
++        yielded = 0
++        dataset_size = len(self.data_source)
++        while yielded < self.num_samples:
++            permutation = torch.randperm(dataset_size).tolist()
++            take = min(dataset_size, self.num_samples - yielded)
++            yield from permutation[:take]
++            yielded += take
++
++    def __len__(self):
++        return self.num_samples
++
++
 +def get_norm_stats(dataset_dir, num_episodes=None, episode_ids=None):
 +    """Compute normalization statistics from the training episodes only.
 +
@@ -780,7 +1476,7 @@ index d90b782..99901e3 100644
          dataset_path = os.path.join(dataset_dir, f'episode_{episode_idx}.hdf5')
          with h5py.File(dataset_path, 'r') as root:
              qpos = root['/observations/qpos'][()]
-@@ -108,16 +119,47 @@ def get_norm_stats(dataset_dir, num_episodes):
+@@ -108,21 +145,62 @@ def get_norm_stats(dataset_dir, num_episodes):
      return stats
  
  
@@ -793,7 +1489,7 @@ index d90b782..99901e3 100644
 +
 +def load_data(dataset_dir, num_episodes, camera_names, batch_size_train, batch_size_val,
 +              split_seed=1, train_episode_ids=None, val_episode_ids=None,
-+              split_manifest_path=None):
++              split_manifest_path=None, train_num_samples=None):
      print(f'\nData from: {dataset_dir}\n')
      # obtain train test split
 -    train_ratio = 0.8
@@ -820,6 +1516,8 @@ index d90b782..99901e3 100644
 +        'train_episode_ids': train_indices.tolist(),
 +        'val_episode_ids': val_indices.tolist(),
 +        'camera_names': list(camera_names),
++        'train_num_samples': int(train_num_samples) if train_num_samples is not None else None,
++        'train_sampler': 'CyclingRandomSampler' if train_num_samples is not None else 'RandomSampler',
 +    }
 +    if split_manifest_path:
 +        with open(split_manifest_path, 'w') as target:
@@ -834,26 +1532,17 @@ index d90b782..99901e3 100644
  
      # construct dataset and dataloader
      train_dataset = EpisodicDataset(train_indices, dataset_dir, camera_names, norm_stats)
-diff --git a/experiment_utils.py b/experiment_utils.py
-new file mode 100644
-index 0000000..7d77446
---- /dev/null
-+++ b/experiment_utils.py
-@@ -0,0 +1,17 @@
-+"""Pure helpers for reproducible paired-view experiments."""
-+
-+import numpy as np
-+
-+
-+def sample_occlusion_rectangle(height, width, area_fraction, seed):
-+    if not 0 < area_fraction < 1:
-+        raise ValueError('area_fraction must be between 0 and 1')
-+    rng = np.random.RandomState(seed)
-+    aspect = np.exp(rng.uniform(np.log(0.5), np.log(2.0)))
-+    rectangle_height = min(
-+        height, max(1, int(round(np.sqrt(area_fraction * height * width / aspect)))))
-+    rectangle_width = min(
-+        width, max(1, int(round(area_fraction * height * width / rectangle_height))))
-+    y0 = int(rng.randint(0, height - rectangle_height + 1))
-+    x0 = int(rng.randint(0, width - rectangle_width + 1))
-+    return [y0, y0 + rectangle_height, x0, x0 + rectangle_width]
+     val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
++    if train_num_samples is None:
++        train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True,
++                                      pin_memory=True, num_workers=1, prefetch_factor=1,
++                                      drop_last=False)
++    else:
++        train_sampler = CyclingRandomSampler(train_dataset, train_num_samples)
++        train_dataloader = DataLoader(train_dataset, batch_size=batch_size_train,
++                                      sampler=train_sampler, shuffle=False, pin_memory=True,
++                                      num_workers=1, prefetch_factor=1, drop_last=False)
+     val_dataloader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=True, pin_memory=True, num_workers=1, prefetch_factor=1)
+ 
+     return train_dataloader, val_dataloader, norm_stats, train_dataset.is_sim
