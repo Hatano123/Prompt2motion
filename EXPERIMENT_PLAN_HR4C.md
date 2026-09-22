@@ -1,271 +1,279 @@
-# HR4C実機を用いたACT視点比較実験 計画書
+# 少数データ双腕挿入におけるACT視点構成・頑健性 実験計画書
 
-作成日: 2026-09-16
-対象機: 株式会社キビテク「協働ロボット HR4C Kohaku-Model4」
-公開情報: <https://qibitech.com/products/#>（同ページ内「協働ロボットHR4C」）
+初版: 2026-09-16
 
-## 1. 結論
+改訂日: 2026-09-22
 
-研究の中心仮説である「単一視点と複数視点で模倣学習方策の性能・頑健性がどう変わるか」は変更しない。一方、現在のMuJoCo実験をHR4Cへそのまま載せることはできないため、**実機パートの構成は変更が必要**である。
+対象: MuJoCo `sim_insertion_scripted`、HR4C実機候補
 
-主な理由は、現行の `sim_insertion_scripted` が双腕・14次元状態／行動を前提にしているのに対し、標準HR4Cは単腕6軸であり、グリッパオプション込みでも8軸だからである。また、シミュレーションのカメラ画像・関節状態・成功判定を、実機のROS/Python API、外部カメラ、非常停止を含む安全実行系へ置き換える必要がある。
+関連仕様: [EXPERIMENT_SPEC_CLEAN50.md](EXPERIMENT_SPEC_CLEAN50.md)
 
-したがって、実験を次の2段階に分ける。
+Clean-50成果物: `results/act/clean50`
 
-1. **シミュレーション比較**: 現在の挿入課題で、top、side、top+sideを同一データ・同一初期状態で比較し、視点数の効果を調べる。
-2. **HR4C実機検証**: 単腕で実施可能な把持・移動・載置課題に置き換え、単一視点と複数視点の差、および実機での安全性・再現性を調べる。
+Clean-50結果・Phase A診断: [EXPERIMENT_RESULTS_CLEAN50_PHASE_A.md](EXPERIMENT_RESULTS_CLEAN50_PHASE_A.md)
 
-双腕化オプションを実際に使用できる場合は、双腕課題も将来の拡張候補にできる。ただし、頭部カメラを含む機体構成、左右腕のAPI、同期方式が未確認なので、現段階では単腕構成を主計画とする。
+## 1. 研究の中心
 
-## 2. HR4Cについて確認できた仕様
+本研究は、少数実演による双腕精密操作において、カメラ視点の追加が模倣学習方策の
+性能と頑健性をいつ改善し、いつ悪化させるかを調べる。
 
-| 項目 | 公開仕様 | 実験への影響 |
-|---|---:|---|
-| 腕部 | 6軸 | 現行の双腕14次元入出力は使用不可 |
-| グリッパ | オプション、2軸 | 採用時は状態・行動を原則8次元として設計。ただしAPI上の表現を要確認 |
-| 可搬質量 | 最大1.0 kg（グリッパを除く） | 対象物、治具、力制限は1 kgより十分小さく設定 |
-| リーチ | 500 mm | 作業領域とカメラ配置を500 mm内で設計 |
-| 制御周期 | 腕100 Hz、指10 Hz | 方策推論周期とロボット指令周期を分離し、補間器を置く |
-| 制御方式 | 位置・速度・電流・トルク | 初期実験は安全性と再現性を優先して位置制御を推奨 |
-| ソフトウェア | ROS、Python | ACTとの接続用アダプタを実装可能 |
-| 対応環境 | Ubuntu 20.04 / ROS1 Noetic / Python 3.8、Ubuntu 22.04 / Python 3.10 | ROS使用範囲と提供SDKの組合せをメーカーに確認 |
-| 搭載計算機 | Jetson Orin Nano 8 GB | 学習は外部GPU、実機側は制御・取得・必要なら推論を担当 |
-| インターフェース | 1000BASE-T×3、HDMI×1、USB×3 | USBまたはEthernetカメラの接続候補 |
-| その他 | バックドライバビリティ、双腕化・頭部カメラオプション | 手動教示の可能性はあるが、教示モードとログAPIは要確認 |
+> 少数データ条件では、複数視点は常に有効とは限らない。視点間の補完性、学習データ量、
+> 遮蔽・欠損、および融合方法によって、性能とseed安定性が変化する。
 
-公開ページだけでは、関節可動範囲、最大速度・トルク、指令API、ROS topic/service/action、タイムスタンプ、非常停止・保護停止、カメラ仕様、URDF、キャリブレーション方法は確認できない。これらを確定するまでは実機用コードと安全条件を確定しない。
+シミュレーションでは現在の双腕peg/socket insertionを体系的に評価する。実機では、
+構成が許せば左腕でsocketまたはfixtureを安定化し、右腕でpegを把持・位置合わせ・挿入する
+`bimanual stabilized insertion`を採用する。実機で再学習する場合は厳密なsim-to-real transfer
+ではなく、シミュレーションで得た知見のreal-world validationとして位置づける。
 
-## 3. 実験目的と研究質問
+## 2. 研究質問
 
-### 目的
+### RQ1: Data efficiency × View configuration
 
-ACT（Action Chunking with Transformers）による視覚模倣学習において、カメラ視点の違いが操作成功率と外乱への頑健性に与える影響を、同一データ・同一初期条件による公平な比較で明らかにし、HR4Cでの実機適用可能性を示す。
+学習デモ数が5、10、25、40と変化するとき、`top`、`side`、`multi`（top+side）の
+成功率、学習効率、seed間変動はどう変化するか。
 
-### 研究質問
+### RQ2: View complementarity and robustness
 
-- 単一のtop視点、単一のside視点、top+sideの複数視点で成功率に差があるか。
-- 物体や手先の遮蔽、カメラ欠損、対象物位置のずれに対して複数視点は頑健か。
-- シミュレーションで観測された視点の優劣がHR4C実機でも再現するか。
-- 失敗は認識、到達、把持、搬送、載置のどこで発生するか。
+どの初期状態・幾何条件で各視点が有効か。また、遮蔽、camera missing、camera pose shiftに
+対して、multi-viewはsingle-viewよりcleanからの性能低下を抑えられるか。
 
-### 仮説
+### RQ3: Robust multi-view learning
 
-- 複数視点は遮蔽時とカメラ欠損時の性能低下を小さくする。
-- clean条件だけでは単一視点との差が小さい場合がある。
-- 実機ではカメラ間同期、遅延、キャリブレーション誤差により、複数視点の利点が相殺される場合がある。
+視点欠損を考慮した学習・融合方法により、naive multi-viewのclean性能、seed不安定性、
+視点欠損耐性を改善できるか。
 
-## 4. 現在のシミュレーション実験
+実機検証は独立した広いRQではなく、上記の主要傾向が双腕実機のstabilized insertionでも
+再現するかを確認する外的妥当性検証とする。
 
-### 比較条件
+## 3. 既存Clean-50実験
+
+### 3.1 設計
 
 | 項目 | 条件 |
 |---|---|
-| 課題 | `sim_insertion_scripted` |
-| 学習器 | ACT、ResNet-18 backbone |
-| 視点 | single-top / single-side / multi（top+side） |
-| デモ数 | 10（同一HDF5にtopとsideを同時保存） |
-| データ分割 | 学習8、検証2、split seed 1 |
-| 学習seed | 0 |
-| epoch | 2,000 |
-| 評価checkpoint | 500 / 1,000 / 1,500 / 2,000 epoch |
-| batch size | 8を主条件、1を補助条件として実行済み |
-| learning rate | `1e-5` |
-| chunk size | 100 |
-| KL weight | 10 |
-| clean評価 | 共通初期状態50件、seed 1000 |
-| 主要評価値 | 成功率、平均return、validation loss |
+| task | `sim_insertion_scripted` |
+| データ | 成功50 episode、生成seed 0、top/side同時収録 |
+| split | episode 0–39=train、40–49=dataset validation |
+| view | single-top / single-side / multi |
+| training seed | 0 / 1 / 2 |
+| 学習 | ACT、2,000 epoch、batch 8、lr `1e-5`、chunk 100、KL 10 |
+| checkpoint選択 | 独立validation 50状態、seed 1100 |
+| held-out test | 独立test 100状態、seed 1200 |
 
-データは `act_sim_insertion_scripted_top_side_seed0_10episodes.zip`、評価初期状態は `sim_insertion_eval_seed1000_50.json` を全モデルで共有している。この対応により、視点以外の差を抑えたpaired comparisonになっている。
+全モデルは同一のデモarchive、episode split、validation/test manifestを使用した。test 9 runの
+初期状態列がmanifestと完全一致し、全rolloutがclean・camera corruptionなしであることを監査済み
+である。カメラはMuJoCo XML内の固定top/side cameraである。
 
-### 現在までの参考結果
+### 3.2 結果
 
-batch size 8のclean評価（各checkpoint 50 rollout）では、2,000 epoch時点の成功率はsingle-top 6%、single-side 2%、multi 2%だった。batch size 1では、同じ時点でsingle-top 2%、single-side 6%、multi 18%だった。ただし、いずれもseed 0・10デモのみであり、batch sizeによって傾向も変わっているため、**「複数視点が優れる」と結論するには不足**している。
+| モデル | seed 0 | seed 1 | seed 2 | 平均成功率 ± seed SD | 平均return |
+|---|---:|---:|---:|---:|---:|
+| single-top | 35% | 46% | 46% | 42.3 ± 6.4% | 364.2 |
+| single-side | 41% | 65% | 44% | **50.0 ± 13.1%** | **380.5** |
+| multi | 37% | 30% | 53% | 40.0 ± 11.8% | 357.6 |
 
-現時点の成果は、優劣の確定ではなく、同一データ・同一評価初期状態で3視点条件を比較できる再現可能な実験系と、追加検証が必要であることを示す予備結果である。
+Clean-50ではsingle-sideが最高で、naive multi-viewの改善は確認できなかった。ただしmultiには
+固有の成功状態があり、単純な包含関係ではない。
 
-## 5. HR4C実機実験の推奨構成
+| paired pattern | 300状態中の件数 |
+|---|---:|
+| side成功・multi失敗 | 83 |
+| multi成功・side失敗 | 53 |
+| sideだけ成功 | 51 |
+| multiだけ成功 | 22 |
+| 全モデル成功 | 37 |
+| 全モデル失敗 | 70 |
 
-### 5.1 課題
+状態別成果物は `results/act/clean50/paired_outcomes.csv`、
+`paired_pattern_summary.csv`、`scripts/analyze_clean50_paired.py` に固定する。
 
-最初の実機課題は、単腕で完結する「対象物を把持し、指定位置へ移動して載置する」pick-and-placeとする。現在の双腕挿入課題を無理に再現するより、HR4Cの構成に合い、失敗段階を判定しやすい。
+現時点の結論は「multi-viewは弱い」ではなく、次のように限定する。
 
-- 軽量で破損しにくい対象物を1種類使用する。
-- 初期位置と目標位置を治具またはマーカーで定義する。
-- 初期段階では机、台座、対象物、照明を固定する。
-- 基礎実験の後に位置ずれ、遮蔽、照明変化を追加する。
+> 40学習デモ条件ではmulti-viewの平均改善は確認されず、single-sideが最高だった。
+> 一方でモデル固有の成功状態が存在し、視点補完性と融合失敗の診断が必要である。
 
-### 5.2 システム構成
+## 4. Phase A: Paired失敗診断
 
-```text
-topカメラ ─┐
-             ├─ 時刻同期・前処理 ─ ACT方策 ─ 安全フィルタ ─ HR4C指令アダプタ
-sideカメラ ─┘                         │                         │
-                               推論ログ・動画            関節状態・異常状態
-                                         └──── 同期記録 ────┘
-```
+新規の大規模学習より先に、既存300 paired rolloutを分析する。
 
-- 学習: 外部GPU環境で実施する。
-- 実行: Jetsonまたは外部PCで推論し、ROS/Python経由でHR4Cへ位置目標を送る。
-- 記録: RGB、関節位置、グリッパ状態、指令値、時刻、episode結果、停止理由を同一時計で保存する。
-- 制御: ACTの出力を直接モータへ送らず、関節上限、速度上限、加速度／躍度、workspace、通信watchdogを通す。
-- 周期: 腕の内部制御100 Hzとは別に、カメラ・推論周期を実測して決め、指令間はロボット側補間を用いる。指の10 Hz制限も考慮する。
+- pegとsocketの初期相対距離、x/y方向の相対変位
+- peg/socketのworkspace内位置
+- top/side画像平面上の投影距離（取得可能な場合）
+- 各モデルのepisode return、highest reward、成功パターン
+- 失敗段階（接近、把持維持、位置合わせ、接触、挿入）
+- side優位・multi優位状態の代表動画
 
-### 5.3 観測と行動
+初期状態特徴付きpaired CSV、成功パターン別位置分布図、モデル別成功領域を出力する。この解析から
+RQ2の事前仮説とRobustness条件を決める。test結果を使って既存checkpointを再選択しない。
 
-| 要素 | 推奨案 |
-|---|---|
-| 画像 | top RGB、side RGB。解像度・露光・white balanceを固定 |
-| robot state | 腕6関節位置＋グリッパ2軸またはSDKが返す等価状態 |
-| action | 次時刻の関節位置目標。初期検証では速度・トルク指令を使わない |
-| 時刻 | 全camera frame、state、actionにtimestampを付与 |
-| ACT入力次元 | 実機API確定後に6+gripper表現へ変更 |
-| episode長 | 実測タスク時間と方策周期から決定し、全条件で固定 |
-
-グリッパが2軸でも、SDKが開閉量1値として扱う可能性があるため、8次元と断定せずログ仕様を先に確認する。現行の14次元正規化統計やcheckpointは流用せず、HR4Cデータから再学習する。
-
-### 5.4 データ収集
-
-- 同じ実演時にtopとsideを同時収録し、後から使用カメラだけを切り替える。
-- 初期デモ数は各課題50成功episodeを目標とし、10 episodeは接続確認用pilotに限定する。
-- 失敗した教示、非常停止、通信欠損は学習データから分離して保存する。
-- train/validation/testの初期配置を先に固定し、同一物理試行をモデル間で可能な限り対応付ける。
-- 物体初期位置、目標位置、照明、camera pose、robot base pose、対象物個体をmanifestに記録する。
-- 手動誘導を使う場合、バックドライバビリティがあることだけでは安全な教示を保証しないため、メーカー指定の教示手順に従う。
-
-### 5.5 比較する実験条件
-
-学習条件は原則、視点以外を共通にする。
+## 5. Phase B: データ量実験（RQ1）
 
 | 因子 | 条件 |
 |---|---|
-| 視点 | top / side / top+side |
-| 学習データ | 同一episode、同一split |
-| 学習seed | 最低3 seedを推奨 |
-| デモ数 | まず50。余裕があれば10 / 25 / 50でデータ効率も比較 |
-| Clean | 固定照明、遮蔽なし、標準初期位置 |
-| Position shift | 学習範囲内と範囲外の位置ずれ |
-| Occlusion | 一方の視点で対象物または手先を部分遮蔽 |
-| Camera missing | 一方の画像を欠損扱い。学習時に欠損を含める条件とは分ける |
-| 評価回数 | 各モデル・各条件30～50試行。初期配置セットを共有 |
+| view | top / side / multi |
+| 学習デモ数 | 5 / 10 / 25 / 40 |
+| training seed | 0 / 1 / 2 |
+| clean test | Clean-50と同じ100状態 |
+| checkpoint選択 | Clean-50と同じvalidation 50状態 |
+| 主指標 | test成功率 |
+| 副指標 | return、seed SD、学習曲線、成功パターン |
 
-camera missingは、欠損を一度も学習していないモデルへ突然ゼロ画像を入れる「故障耐性試験」と、camera dropoutを含めて学習する「対策済みモデル試験」を区別する。
+デモ集合はnestedに固定する。
 
-### 5.6 評価指標
+- 5 demos: episode 0–4
+- 10 demos: episode 0–9
+- 25 demos: episode 0–24
+- 40 demos: episode 0–39（完了済み）
+- dataset validation: episode 40–49（全条件共通）
 
-主要指標はタスク成功率とし、95%信頼区間も併記する。補助指標として以下を記録する。
+新規runは27学習＋27 testである。まずseed 0の9条件を実行し、成果物と学習挙動を監査した後に
+seed 1・2の18条件を実行する。
 
-- 把持成功率、搬送成功率、載置成功率
-- 完了時間、再把持回数、軌道長
-- 最大関節速度、停止／介入回数、通信欠損数
-- 対象物・目標位置の誤差
-- 条件別の性能低下量（cleanとの差）
-- seed間変動
+### 学習budgetの統制
 
-モデル比較は、同じ初期配置を使った対応のある結果として扱う。成功／失敗にはMcNemar検定または対応を考慮したbootstrapを用い、成功率の差と信頼区間を報告する。多数条件を比較する場合は多重比較も考慮する。
+同じepoch数だけでは、デモ数によって総optimizer step数が変わり、データ量と最適化量が交絡する。
+主解析では総optimizer step数を40-demo条件に合わせ、小規模集合を反復samplingする。同一epoch条件は
+必要に応じて補助解析とする。全条件でoptimizer step数、各episodeの露出回数、parameter数、
+camera順、推論時間、checkpoint選択規則を固定・記録する。
 
-## 6. 実験前に変更・追加するもの
+## 6. Phase C: 頑健性評価（RQ2）
 
-### 変更が必要
+実験数を抑えるため、10-demoと40-demoのみを対象にする。Phase Bで選択済みのcheckpointを
+再学習せず評価する。
 
-- 双腕14次元の入出力をHR4C単腕用へ変更する。
-- シミュレーション生成デモではなく、HR4Cで同時収録した実演データで再学習する。
-- シミュレーション固有の成功報酬を、実機で観測可能な成功判定へ変更する。
-- top/sideの仮想camera poseを、実機の固定カメラ配置と外部キャリブレーションへ変更する。
-- MuJoCo rolloutを、ROS/Python接続、状態取得、安全フィルタ付きの実機runnerへ置き換える。
+| 条件 | 内容 |
+|---|---|
+| clean | 基準条件 |
+| occlusion 25% / 50% | topまたはsideの一定面積を遮蔽 |
+| camera missing | 一方のviewを欠損 |
+| camera pose shift | 位置・姿勢を事前定義量だけ変更 |
 
-### 維持できる
+multiではtopとsideを個別に外乱させ、single-viewでは使用viewを外乱させる。ランダム矩形だけでなく、
+peg、socket、左腕、右腕のどれが遮蔽されたかを記録する。主要指標は
+`success_corrupted - success_clean` とし、同一初期状態・同一外乱seedを共有する。
 
-- ACTの基本アーキテクチャと視点別3モデルの比較方針。
-- 同一episodeから使用視点だけを切り替えるpaired design。
-- train/validation split、複数checkpoint評価、seed管理、動画・失敗ケース保存の枠組み。
-- clean、occlusion、camera missingという頑健性評価の考え方。
+## 7. Phase D: 改善法（RQ3）
 
-### 実機受領後に必ず確認
+Baselineはsingle-top、single-side、naive multi、training-time camera/modality dropoutとする。
+単純なsensor/modality dropout自体は既存研究があるため、新規手法とは主張しない。
 
-1. 単腕／双腕、グリッパ、頭部カメラ、バッテリの納入構成。
-2. ROSのversion、topic/service/action一覧、Python SDK、サンプルコード、URDF。
-3. 関節名・順序・単位・原点・可動範囲・速度上限・指令timeout。
-4. 状態取得と指令の実測周期、timestampの基準、ネットワーク遅延。
-5. グリッパ2軸の独立性と、開閉量・把持検知・電流値の取得可否。
-6. 非常停止、保護停止、再起動、衝突検知、手動教示の正規手順。
-7. 搭載／外部カメラの型番、解像度、fps、同期方法、intrinsics/extrinsics取得方法。
-8. 1 kg可搬条件の詳細と、推奨対象物質量、姿勢、速度。
+- Akinola et al., *Learning Precise 3D Manipulation from Multiple Uncalibrated Cameras*, 2020
 
-## 7. 安全ゲート
+  <https://arxiv.org/abs/2002.09107>
+- Cheng et al., *Robust Bimanual Vision-Language-Action Models via Embarrassingly Simple Modality Masking*, 2026
 
-実機方策は次の順序で段階的に開放する。
+  <https://arxiv.org/abs/2608.22419>
 
-1. ロボット停止状態で、画像・状態・時刻同期だけを検証。
-2. 無負荷・低速で単関節の位置指令とwatchdogを検証。
-3. workspaceを狭く制限し、固定軌道を低速再生。
-4. 人が対象物を持たない無人領域で、1 episodeだけ方策を実行。
-5. 失敗時停止が確認できた後に反復評価へ進む。
+仮称ViewDrop-ACTは単純dropoutで終わらせず、paired診断が支持する最小構成を採用する。
 
-各段階で非常停止担当者を置き、メーカーの安全マニュアル、リスクアセスメント、設置基準を優先する。公開ページの「協働ロボット」という名称だけを根拠に、人との接触を許容する実験は行わない。
+- view availability token
+- view別encoderとgated fusion
+- view信頼度の推定と重み付け
+- feature scaleの正規化
+- camera missingと局所遮蔽を混合したtraining corruption
 
-## 8. 想定スケジュールと判定基準
+主張は「dropoutの発明」ではなく、少数データ双腕挿入におけるnaive multi-viewの失敗を診断し、
+信頼度を考慮した融合で改善することに置く。本評価は10-demoと40-demoに限定する。
+
+## 8. Phase E: HR4C実機検証
+
+### 課題選択
+
+納入機が双腕構成で、左右腕の同期API、安全機能、可動域が確認できる場合、実機課題は
+`bimanual stabilized insertion`とする。
+
+- 左腕: socketまたはfixtureを把持・安定化
+- 右腕: pegを把持し、接近、6DoF位置合わせ、挿入
+- top/side camera: 同一実演時に同期収録
+
+双腕を利用できない場合は、socketを治具で固定した単腕insertionへ縮退する。旧計画の
+pick-and-placeは接続確認用候補に留め、研究本実験は可能な限りinsertionへ合わせる。
+
+本評価は20～30成功デモ程度でsingle-side、naive multi、改善版multiを比較する。cleanに加え、
+左腕による自然遮蔽、右腕による自然遮蔽、片側camera missingを評価する。
+
+### 実機構成確定前の必須確認
+
+1. 単腕／双腕、グリッパ、頭部cameraの納入構成。
+2. ROS version、Python SDK、topic/service/action、URDF。
+3. 関節順序、単位、可動範囲、速度・トルク上限、command timeout。
+4. 左右腕の指令同期とstate timestamp。
+5. 非常停止、保護停止、衝突検知、手動教示の正式手順。
+6. camera型番、fps、同期方法、intrinsics/extrinsics。
+7. camera/base/fixture poseを固定・記録する方法。
+8. peg/socketの公差、挿入力、最大許容力、成功判定。
+
+公開仕様と納入構成の確認が終わるまで、双腕利用を確定事項として扱わない。
+
+## 9. 統計解析
+
+- seed別成功率とseed平均±SDを必ず併記する。
+- 300 rolloutを独立な300学習反復として扱わない。
+- 同一seed・初期状態の成功差はMcNemar検定またはpaired bootstrapで評価する。
+- 成功率差はp値だけでなくpercentage-point差と95%信頼区間を示す。
+- 複数の外乱・pairを検定する場合は多重比較を補正する。
+- checkpoint選択後のheld-out testを再選択に使用しない。
+
+## 10. 再現性・妥当性要件
+
+各runについてdataset・manifest・sourceのSHA-256、Git commitとdirty diff、episode ID、camera名・順序・
+intrinsics/extrinsics・scene XML hash、optimizer step数、sampling回数、training seed、parameter数、
+推論時間、validation全候補、rollout別初期状態・成功・return・失敗段階・外乱情報を保存する。
+
+Clean-50では生成時scene XML hashとcamera extrinsicsをarchive metadataへ埋め込んでいない。
+次回データ生成からこのprovenanceを追加する。
+
+Phase B以降のtest rolloutでは`--save_timeseries`を有効にし、既存JSONL・動画とは別に、各stepの
+reward、policy action、commanded qpos、pre/post qpos、gripper state、peg/socket pose、raw contact pairを
+圧縮NPZへ保存する。形式とvalidatorは[ROLLOUT_TIMESERIES_LOGGING.md](ROLLOUT_TIMESERIES_LOGGING.md)に従う。
+各本評価の前に同一checkpoint・manifestの1--3 rolloutでlogging ON/OFFのaction・reward・success一致を
+確認する。
+
+## 11. 実機安全ゲート
+
+1. 停止状態でcamera、state、action timestampを監査する。
+2. 無負荷・低速で各腕の単関節指令とwatchdogを検証する。
+3. workspace、関節速度、加速度、挿入力を制限して固定軌道を再生する。
+4. 左右腕の同期停止と片腕異常時の両腕停止を確認する。
+5. 人がworkspace内にいない状態で1 episodeだけ方策を実行する。
+6. 失敗時停止を確認してから反復評価へ進む。
+
+メーカーの安全マニュアルとリスクアセスメントを最優先とし、「協働ロボット」という名称だけを
+根拠に人との接触を許容しない。
+
+## 12. 実施順序と停止条件
 
 | Phase | 内容 | 完了条件 |
 |---|---|---|
-| 0 | 仕様・安全確認 | 上記8項目とリスクアセスメントが確定 |
-| 1 | 接続・記録 | 画像、state、actionを欠損なく同期保存 |
-| 2 | 固定軌道 | 低速で反復し、停止・上限制御が機能 |
-| 3 | 10デモpilot | ACT学習から1試行実行までend-to-end動作 |
-| 4 | 50デモ本実験 | top / side / multiを同一split、複数seedで学習 |
-| 5 | 頑健性評価 | clean、位置ずれ、遮蔽、欠損を共通条件で評価 |
-| 6 | 分析 | 成功率CI、失敗分類、動画、再現手順を整理 |
+| A | Clean-50 paired診断 | 幾何特徴、失敗段階、代表動画を整理 |
+| B0 | 5/10/25-demo、seed 0 | 9条件の設定・成果物・学習budgetを監査 |
+| B1 | seed 1・2追加 | 全データ量×viewの3 seed完了 |
+| C | 10/40-demo robustness | clean低下量とpaired結果を集計 |
+| D0 | modality dropout baseline | naive multiとの差を確認 |
+| D1 | 改善版multi | cleanとrobustnessの改善を確認 |
+| E0 | 実機仕様・安全確認 | 双腕／単腕課題を確定 |
+| E1 | 10-demo接続pilot | 収録から低速実行までend-to-end確認 |
+| E2 | 実機本評価 | side / multi / 改善版multiを比較 |
 
-10デモpilotの成功率は研究結論には使用せず、配線・同期・データ形式・学習パイプラインの確認に使う。
+各段階の前に入力hash、評価状態、camera設定、学習budget、動画を監査する。seed 0で床効果、
+学習崩壊、入力不一致が見つかった場合はseed追加を止める。
 
-## 9. 成果として提示できるもの
+## 13. 主張できる範囲
 
-### 研究上の成果
+- Phase B完了: データ量と視点構成の関係をシミュレーション内で主張できる。
+- Phase C完了: 視点補完性と外乱別の性能低下を主張できる。
+- Phase D完了: baselineとの差が複数seedで再現した場合のみ改善法の有効性を主張する。
+- 実機pilotのみ: end-to-end実装可能性までとし、性能優位は主張しない。
+- 実機本評価完了: 限定された装置・課題条件でシミュレーション知見の再現性を主張できる。
+- 実機で再学習した場合はsim-to-real transferとは呼ばない。
 
-- 単一視点と複数視点の公平な比較結果。
-- clean性能だけでなく、遮蔽・欠損・位置ずれに対する頑健性の定量評価。
-- シミュレーションとHR4C実機の差、およびsim-to-realで性能が落ちる要因の整理。
-- 認識／到達／把持／搬送／載置に分けた失敗分析。
-- 視点数、デモ数、学習seed、batch sizeが結果へ与える影響。
+複数視点が勝たない場合も、追加視点が有効になるデータ量・幾何条件・外乱と、失敗する融合条件を
+明らかにできれば研究成果となる。
 
-複数視点が勝たなかった場合も、追加カメラが常に有効ではない条件、同期・校正・学習量との関係を示せれば有効な成果になる。
+## 14. 直近の作業
 
-### 技術成果物
-
-- HR4C用ACTデータ収録器と実機runner。
-- HR4Cの観測・行動schema、ROS/Python接続アダプタ、安全フィルタ。
-- top/side同期済み実演データセットとsplit manifest（公開可否は契約確認）。
-- 再現可能な学習設定、checkpoint、評価スクリプト。
-- rollout動画、条件別集計表、failure-case一覧。
-- 実機導入時の確認項目と安全ゲートを含む運用手順。
-
-### 最終報告で主張できる範囲
-
-- 最低3 seed、各条件30～50試行を完了した場合: 条件内での視点構成の効果を統計的に比較できる。
-- seed 0、10デモだけの場合: 実験系構築と予備的傾向まで。一般的な優位性は主張しない。
-- シミュレーションのみの場合: 視点比較手法と仮想環境内の結果まで。HR4Cへの有効性は主張しない。
-- HR4C pilotまでの場合: end-to-end実装可能性まで。本格的な性能比較は今後の課題とする。
-
-## 10. 直近の作業
-
-1. メーカー／提供者からSDK、ROS interface、URDF、安全マニュアル、納入オプション一覧を入手する。
-2. 実機課題をpick-and-placeに確定し、対象物、開始位置、目標、成功条件を数値化する。
-3. top/sideカメラの型番と固定位置を決め、同期・校正方法を決定する。
-4. `observation → ACT → safety filter → command` の最小アダプタを作る。
-5. 低速固定軌道と10デモpilotを完了してから50デモ本実験へ進む。
-
-## 11. 実装済みの最小構成（2026-09-16）
-
-実機SDK入手前に検証可能な範囲として、双腕14自由度を仮定したモック構成で次を実装した。
-
-- top/side画像、関節状態、各timestampを持つ共通観測schema
-- 非常停止、state timeout、camera skew、次元、非有限値、関節範囲をfail-closedで検査する安全フィルタ
-- 1 step当たりの関節変位制限
-- 実機adapterと同じ境界を持つ決定的mock adapter
-- ACT互換HDF5 recorderと、`h5py` 不在時の診断用NPZ recorder
-- end-to-end mock runnerおよびunit test
-
-実行方法と本番移行ゲートは [HR4C_RUNBOOK.md](HR4C_RUNBOOK.md) に記載する。設定ファイル `configs/hr4c_mock.json` の関節範囲は接続試験用の仮値であり、実機には使用しない。メーカーSDK、URDF、安全マニュアルおよび納入実機の構成を確認するまで、実機command adapterは実装・有効化しない。
-
-### シミュレーション進行状況
-
-2026-09-16にbatch size 8を主条件として、single-top / single-side / multiの学習seed 1・2をPBSへ投入した。既存seed 0を含む各モデルについて、共通50初期状態を使った25%遮蔽とcamera missing評価も投入済みである。multiはtopとsideを個別に外乱させ、single-viewは入力に使う視点を外乱させる。完了後は `scripts/summarize_paired_multiseed.py` で成功率、Wilson 95%信頼区間、Cleanからの性能低下量を集計する。
+1. Phase B seed 0の最初のcheckpointでlogging ON/OFF smoke testを通す。
+2. 5/10/25-demo用に固定optimizer step数とnested episode集合を仕様化する。
+3. seed 0の9条件だけを投入し、成果物と詳細時系列ログを監査する。
+4. 同時にHR4Cの双腕構成、左右同期API、安全資料を確認する。
+5. seed 0の監査後に、残り18条件とRobustnessの投入可否を判断する。

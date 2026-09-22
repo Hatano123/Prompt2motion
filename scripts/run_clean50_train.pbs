@@ -78,7 +78,7 @@ PY
 cd "$submit_dir"
 sha256sum "$archive" "$manifest" > "$workdir/artifacts/input_sha256.txt"
 git rev-parse HEAD > "$workdir/artifacts/code_commit.txt"
-sha256sum repos/act/imitate_episodes.py repos/act/utils.py repos/act/experiment_utils.py \
+sha256sum repos/act/imitate_episodes.py repos/act/rollout_logging.py repos/act/utils.py repos/act/experiment_utils.py \
   scripts/run_clean50_train.pbs configs/clean50.json > "$workdir/artifacts/source_sha256.txt"
 touch "$workdir/artifacts/.training_complete"
 echo "[INFO] clean50 validation selection completed: $model_name seed=$train_seed"

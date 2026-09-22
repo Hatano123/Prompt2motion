@@ -20,14 +20,24 @@ mkdir -p "$workdir/checkpoints" "$workdir/output"
 cp "$source_dir/selected_policy.ckpt" "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
 source "$submit_dir/scripts/act_runtime.sh"; normalize_pbs_gpu; prepare_act_runtime
 export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+logging_args=()
+if [[ "${SAVE_TIMESERIES:-1}" == 1 ]]; then
+  logging_args=(--save_timeseries --model_name "$model_name")
+fi
 cd "$repo_stage_dir"
 "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
   --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt --eval_output_dir "$workdir/output" \
   --visual_condition clean --num_rollouts 100 --eval_seed 1200 --eval_initial_states "$manifest" \
   --no_save_episodes --save_first_n_episodes 5 --policy_class ACT --kl_weight 10 --chunk_size 100 \
   --hidden_dim 512 --batch_size "$batch_size" --dim_feedforward 3200 --num_epochs 2000 \
-  --lr 1e-5 --seed "$train_seed" | tee "$workdir/test.log"
+  --lr 1e-5 --seed "$train_seed" "${logging_args[@]}" | tee "$workdir/test.log"
+if [[ "${SAVE_TIMESERIES:-1}" == 1 ]]; then
+  "$act_python" "$submit_dir/scripts/validate_rollout_timeseries.py" \
+    "$workdir/output/timeseries" --manifest "$manifest" | tee "$workdir/timeseries_validation.log"
+fi
 sha256sum "$manifest" > "$workdir/output/test_manifest_sha256.txt"
+sha256sum "$submit_dir/repos/act/imitate_episodes.py" "$submit_dir/repos/act/rollout_logging.py" \
+  > "$workdir/output/evaluation_source_sha256.txt"
 touch "$workdir/output/.complete"
 if [[ "${DELETE_POLICY_AFTER_TEST:-0}" == 1 ]]; then
   rm -f -- "$source_dir/selected_policy.ckpt"

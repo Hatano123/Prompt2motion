@@ -1,0 +1,65 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -N act_log_smoke
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+model_name="${MODEL_NAME:?MODEL_NAME is required}"
+camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+train_seed="${TRAIN_SEED:?TRAIN_SEED is required}"
+num_rollouts="${NUM_ROLLOUTS:-1}"
+source_dir="${SOURCE_DIR:-$submit_dir/results/act/clean50/$model_name/train_seed${train_seed}}"
+manifest="${EVAL_MANIFEST:-$submit_dir/archives/environments/sim_insertion_test_seed1200_100.json}"
+result_dir="$submit_dir/results/act/logging_smoke/${model_name}/train_seed${train_seed}"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_log_smoke_${model_name}_${train_seed}_XXXXXX")"
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir/output"/. "$result_dir"/ 2>/dev/null || true
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+test -s "$source_dir/selected_policy.ckpt"
+test -s "$source_dir/dataset_stats.pkl"
+test -s "$manifest"
+mkdir -p "$workdir/checkpoints" "$workdir/output/off" "$workdir/output/on"
+cp "$source_dir/selected_policy.ckpt" "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+cd "$repo_stage_dir"
+
+common_args=(
+  --eval --task_name sim_insertion_scripted
+  --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt
+  --visual_condition clean --num_rollouts "$num_rollouts" --eval_seed 1200
+  --eval_initial_states "$manifest" --no_save_episodes
+  --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512
+  --batch_size 8 --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5
+  --seed "$train_seed" --model_name "$model_name"
+)
+
+"$act_python" imitate_episodes.py "${common_args[@]}" \
+  --eval_output_dir "$workdir/output/off" \
+  --behavior_trace_dir "$workdir/output/off/behavior" | tee "$workdir/off.log"
+
+"$act_python" imitate_episodes.py "${common_args[@]}" \
+  --eval_output_dir "$workdir/output/on" --save_timeseries \
+  --behavior_trace_dir "$workdir/output/on/behavior" | tee "$workdir/on.log"
+
+"$act_python" "$submit_dir/scripts/validate_rollout_timeseries.py" \
+  "$workdir/output/on/timeseries" --manifest "$manifest" | tee "$workdir/validation.log"
+"$act_python" "$submit_dir/scripts/compare_rollout_behavior.py" \
+  "$workdir/output/off/behavior" "$workdir/output/on/behavior" | tee "$workdir/comparison.log"
+
+touch "$workdir/output/.complete"
+echo "[INFO] logging ON/OFF smoke test passed: $model_name seed=$train_seed rollouts=$num_rollouts"
