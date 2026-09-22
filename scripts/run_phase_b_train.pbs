@@ -6,8 +6,15 @@
 
 set -euo pipefail
 submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
-model_name="${MODEL_NAME:?MODEL_NAME is required}"
-camera_names="${CAMERA_NAMES:?CAMERA_NAMES is required}"
+view_config="${VIEW_CONFIG:-${MODEL_NAME:-}}"
+case "$view_config" in
+  single_top) expected_camera_names="top" ;;
+  single_side) expected_camera_names="side" ;;
+  multi) expected_camera_names="top,side" ;;
+  *) echo "[ERROR] VIEW_CONFIG/MODEL_NAME must be single_top, single_side, or multi" >&2; exit 4 ;;
+esac
+model_name="${MODEL_NAME:-$view_config}"
+camera_names="${CAMERA_NAMES:-$expected_camera_names}"
 demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
 train_seed="${TRAIN_SEED:-0}"
 smoke_mode="${SMOKE_MODE:-0}"

@@ -27,11 +27,16 @@ if (( available_bytes > reserve_bytes )); then
   capacity_runs=$(( (available_bytes - reserve_bytes) / checkpoint_bytes_per_run ))
 fi
 (( capacity_runs > 9 )) && capacity_runs=9
-existing_runs=0
+pending_runs=0
 if [[ -s "$registry" ]]; then
-  existing_runs="$(awk -F '\t' 'NR>1 && !seen[$3]++ {count++} END {print count+0}' "$registry")"
+  while IFS=$'\t' read -r demos model; do
+    [[ -n "$demos" && -n "$model" ]] || continue
+    if [[ ! -e "results/act/phase_b/${demos}demos/${model}/train_seed0/.training_complete" ]]; then
+      pending_runs=$((pending_runs + 1))
+    fi
+  done < <(awk -F '\t' 'NR>1 && !seen[$3]++ {print $4 "\t" $5}' "$registry")
 fi
-safe_jobs=$((capacity_runs - existing_runs))
+safe_jobs=$((capacity_runs - pending_runs))
 (( safe_jobs < 0 )) && safe_jobs=0
 requested_jobs="${MAX_JOBS:-$safe_jobs}"
 [[ "$requested_jobs" =~ ^[0-9]+$ ]] || {
@@ -68,16 +73,10 @@ for demos in 5 10 25; do
       continue
     fi
     (( submitted >= requested_jobs )) && break 2
-    if [[ "$cameras" == *,* ]]; then
-      # PBS treats commas in `qsub -v` values as variable separators. Export the
-      # exact Clean-50 camera order through the inherited environment instead.
-      export MODEL_NAME="$model" CAMERA_NAMES="$cameras" DEMO_COUNT="$demos" TRAIN_SEED=0
-      job_id="$(qsub -V scripts/run_phase_b_train.pbs)"
-      unset MODEL_NAME CAMERA_NAMES DEMO_COUNT TRAIN_SEED
-    else
-      job_id="$(qsub -v MODEL_NAME="$model",CAMERA_NAMES="$cameras",DEMO_COUNT="$demos",TRAIN_SEED=0 \
-        scripts/run_phase_b_train.pbs)"
-    fi
+    # Pass the view as a comma-free symbolic name; the PBS script resolves and
+    # verifies the exact Clean-50 camera order.
+    job_id="$(qsub -v VIEW_CONFIG="$model",DEMO_COUNT="$demos",TRAIN_SEED=0 \
+      scripts/run_phase_b_train.pbs)"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(date --iso-8601=seconds)" "$job_id" "$run_name" "$demos" "$model" "$cameras" \
       >> "$registry"
@@ -86,5 +85,5 @@ for demos in 5 10 25; do
   done
 done
 
-echo "[INFO] submitted=$submitted additional_storage_safe_limit=$safe_jobs existing_runs=$existing_runs available_bytes=$available_bytes"
+echo "[INFO] submitted=$submitted additional_storage_safe_limit=$safe_jobs pending_runs=$pending_runs available_bytes=$available_bytes"
 echo "[INFO] registry=$registry"
