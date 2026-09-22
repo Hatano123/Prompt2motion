@@ -22,11 +22,17 @@ registry="results/act/phase_b/submitted_jobs.tsv"
 checkpoint_bytes_per_run=1344472356
 reserve_bytes=$((2 * 1024 * 1024 * 1024))
 available_bytes="$(df -PB1 . | awk 'NR==2 {print $4}')"
-safe_jobs=0
+capacity_runs=0
 if (( available_bytes > reserve_bytes )); then
-  safe_jobs=$(( (available_bytes - reserve_bytes) / checkpoint_bytes_per_run ))
+  capacity_runs=$(( (available_bytes - reserve_bytes) / checkpoint_bytes_per_run ))
 fi
-(( safe_jobs > 9 )) && safe_jobs=9
+(( capacity_runs > 9 )) && capacity_runs=9
+existing_runs=0
+if [[ -s "$registry" ]]; then
+  existing_runs="$(awk -F '\t' 'NR>1 && !seen[$3]++ {count++} END {print count+0}' "$registry")"
+fi
+safe_jobs=$((capacity_runs - existing_runs))
+(( safe_jobs < 0 )) && safe_jobs=0
 requested_jobs="${MAX_JOBS:-$safe_jobs}"
 [[ "$requested_jobs" =~ ^[0-9]+$ ]] || {
   echo "[ERROR] MAX_JOBS must be a non-negative integer" >&2
@@ -80,5 +86,5 @@ for demos in 5 10 25; do
   done
 done
 
-echo "[INFO] submitted=$submitted storage_safe_limit=$safe_jobs available_bytes=$available_bytes"
+echo "[INFO] submitted=$submitted additional_storage_safe_limit=$safe_jobs existing_runs=$existing_runs available_bytes=$available_bytes"
 echo "[INFO] registry=$registry"
