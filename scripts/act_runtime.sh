@@ -2,16 +2,60 @@
 
 normalize_pbs_gpu() {
     local pbs_visible="${CUDA_VISIBLE_DEVICES-}"
+    local source_name="CUDA_VISIBLE_DEVICES"
+    local source_value="$pbs_visible"
+
+    # Some PBS hook versions expose the allocated AMD GPU through a ROCm
+    # variable but omit CUDA_VISIBLE_DEVICES.  Reuse only an unambiguous,
+    # single numeric allocation; never guess a physical GPU index.
+    if [[ -z "$source_value" ]]; then
+        local candidate_name candidate_value
+        for candidate_name in HIP_VISIBLE_DEVICES ROCR_VISIBLE_DEVICES GPU_DEVICE_ORDINAL; do
+            candidate_value="${!candidate_name-}"
+            if [[ "$candidate_value" =~ ^[0-9]+(-.*)?$ ]]; then
+                source_name="$candidate_name"
+                source_value="$candidate_value"
+                break
+            fi
+        done
+    fi
+
+    # PBS installations may instead provide one allocated device in a GPU
+    # file.  Accept it only when there is exactly one non-empty line and that
+    # line has an explicit trailing GPU index (for example, host-gpu0).
+    if [[ -z "$source_value" && -n "${PBS_GPUFILE-}" && -r "$PBS_GPUFILE" ]]; then
+        local gpu_file_lines gpu_file_index
+        gpu_file_lines="$(awk 'NF {count++} END {print count+0}' "$PBS_GPUFILE")"
+        if [[ "$gpu_file_lines" == 1 ]]; then
+            gpu_file_index="$(sed -nE 's/.*([Gg][Pp][Uu]|device)[^0-9]*([0-9]+)$/\2/p' "$PBS_GPUFILE")"
+            if [[ "$gpu_file_index" =~ ^[0-9]+$ ]]; then
+                source_name="PBS_GPUFILE"
+                source_value="$gpu_file_index"
+            fi
+        fi
+    fi
+
+    if [[ -z "$source_value" ]]; then
+        echo "[WARN] PBS did not expose a GPU visibility variable; deferring to the runtime single-device check"
+        echo "[INFO] HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES-<unset>}"
+        echo "[INFO] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES-<unset>}"
+        echo "[INFO] GPU_DEVICE_ORDINAL=${GPU_DEVICE_ORDINAL-<unset>}"
+        echo "[INFO] PBS_GPUFILE=${PBS_GPUFILE-<unset>}"
+        return 0
+    fi
+
+    pbs_visible="$source_value"
     case "$pbs_visible" in
-        [0-9]*-*)
-            export CUDA_VISIBLE_DEVICES="${pbs_visible%%-*}"
+      [0-9]*-*)
+            pbs_visible="${pbs_visible%%-*}"
             ;;
-        ''|*[!0-9,]*)
-            echo "[ERROR] unsupported CUDA_VISIBLE_DEVICES=${pbs_visible:-<unset>}" >&2
+        *[!0-9]*|'')
+            echo "[ERROR] unsupported single-GPU allocation from $source_name=${source_value:-<unset>}" >&2
             return 4
             ;;
     esac
-    echo "[INFO] PBS CUDA_VISIBLE_DEVICES=${pbs_visible:-<unset>}"
+    export CUDA_VISIBLE_DEVICES="$pbs_visible"
+    echo "[INFO] PBS GPU allocation source: $source_name=$source_value"
     echo "[INFO] normalized CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 }
 
