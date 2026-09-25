@@ -1,0 +1,144 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=08:00:00
+#PBS -N act_b_select
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+view_config="${VIEW_CONFIG:?VIEW_CONFIG is required}"
+demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
+train_seed="${TRAIN_SEED:-0}"
+
+case "$view_config" in
+  single_top) camera_names="top" ;;
+  single_side) camera_names="side" ;;
+  multi) camera_names="top,side" ;;
+  *) echo "[ERROR] invalid VIEW_CONFIG=$view_config" >&2; exit 4 ;;
+esac
+case "$demo_count" in 5|10|25) ;; *) echo "[ERROR] invalid DEMO_COUNT=$demo_count" >&2; exit 4 ;; esac
+[[ "$train_seed" == 0 ]] || { echo "[ERROR] Phase B selection is seed 0 only" >&2; exit 4; }
+
+source_dir="$submit_dir/results/act/phase_b/${demo_count}demos/$view_config/train_seed${train_seed}"
+result_dir="$source_dir/checkpoint_selection"
+manifest="$submit_dir/archives/environments/sim_insertion_validation_seed1100_50.json"
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir="$(mktemp -d "${tmp_work_base%/}/act_phase_b_select_${demo_count}_${view_config}_${train_seed}_XXXXXX")"
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir/artifacts"/. "$result_dir"/ 2>/dev/null || true
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+test -e "$source_dir/.training_complete"
+test -s "$source_dir/dataset_stats.pkl"
+test -s "$source_dir/checkpoint_manifest.json"
+test -s "$manifest"
+[[ ! -e "$result_dir/.complete" ]] || { echo "[ERROR] selection already complete: $result_dir" >&2; exit 5; }
+
+mkdir -p "$workdir/checkpoints" "$workdir/artifacts/eval_validation"
+cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
+for epoch in 500 1000 1500 2000; do
+  checkpoint="policy_epoch_${epoch}_seed_${train_seed}.ckpt"
+  test -s "$source_dir/$checkpoint"
+  cp "$source_dir/$checkpoint" "$workdir/checkpoints/"
+done
+
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+cd "$repo_stage_dir"
+
+for epoch in 500 1000 1500 2000; do
+  checkpoint="policy_epoch_${epoch}_seed_${train_seed}.ckpt"
+  output_dir="$workdir/artifacts/eval_validation/epoch_$epoch"
+  mkdir -p "$output_dir"
+  "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+    --ckpt_dir "$workdir/checkpoints" --eval_ckpt "$checkpoint" \
+    --eval_output_dir "$output_dir" --visual_condition clean --num_rollouts 50 \
+    --eval_seed 1100 --eval_initial_states "$manifest" --no_save_episodes \
+    --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size 8 \
+    --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed "$train_seed" \
+    --model_name "$view_config" | tee "$workdir/validation_epoch_${epoch}.log"
+done
+
+export PHASE_B_SELECT_WORKDIR="$workdir" PHASE_B_SELECT_SOURCE="$source_dir"
+export PHASE_B_SELECT_MODEL="$view_config" PHASE_B_SELECT_CAMERAS="$camera_names"
+export PHASE_B_SELECT_DEMOS="$demo_count" PHASE_B_SELECT_SEED="$train_seed"
+"$act_python" - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+w = Path(os.environ['PHASE_B_SELECT_WORKDIR'])
+source = Path(os.environ['PHASE_B_SELECT_SOURCE'])
+seed = int(os.environ['PHASE_B_SELECT_SEED'])
+rows = []
+for epoch in (500, 1000, 1500, 2000):
+    path = (w / 'artifacts' / 'eval_validation' / f'epoch_{epoch}' /
+            f'rollouts_policy_epoch_{epoch}_seed_{seed}.jsonl')
+    episodes = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if len(episodes) != 50:
+        raise RuntimeError(f'{path} has {len(episodes)} rollouts, expected 50')
+    rollout_ids = [int(row.get('rollout_id', row.get('rollout'))) for row in episodes]
+    if rollout_ids != list(range(50)):
+        raise RuntimeError(f'{path} rollout IDs do not preserve manifest order')
+    successes = sum(bool(row['success']) for row in episodes)
+    highest_rewards = [int(row['highest_reward']) for row in episodes]
+    checkpoint = source / f'policy_epoch_{epoch}_seed_{seed}.ckpt'
+    digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    rows.append({
+        'epoch': epoch,
+        'optimizer_step': epoch * 5,
+        'checkpoint': checkpoint.name,
+        'checkpoint_sha256': digest,
+        'rollouts': len(episodes),
+        'successes': successes,
+        'success_rate': successes / len(episodes),
+        'average_return': sum(float(row['episode_return']) for row in episodes) / len(episodes),
+        'highest_reward_counts': {str(reward): highest_rewards.count(reward) for reward in range(5)},
+    })
+
+selected = max(rows, key=lambda row: (
+    row['success_rate'], row['average_return'], -row['optimizer_step']))
+summary = {
+    'selection_dataset': 'fixed_validation_manifest',
+    'selection_manifest': 'archives/environments/sim_insertion_validation_seed1100_50.json',
+    'evaluation_seed': 1100,
+    'heldout_test_used_for_selection': False,
+    'model': os.environ['PHASE_B_SELECT_MODEL'],
+    'camera_names': os.environ['PHASE_B_SELECT_CAMERAS'].split(','),
+    'demo_count': int(os.environ['PHASE_B_SELECT_DEMOS']),
+    'training_seed': seed,
+    'selection_rule': 'max success_rate, then max average_return, then earliest optimizer_step',
+    'results': rows,
+    'selected_checkpoint': selected['checkpoint'],
+    'selected_checkpoint_sha256': selected['checkpoint_sha256'],
+    'selected_epoch': selected['epoch'],
+    'selected_optimizer_step': selected['optimizer_step'],
+}
+output = w / 'artifacts' / 'validation_summary.json'
+output.write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+(w / 'artifacts' / 'selected_checkpoint.json').write_text(json.dumps({
+    key: summary[key] for key in (
+        'selected_checkpoint', 'selected_checkpoint_sha256', 'selected_epoch',
+        'selected_optimizer_step', 'selection_rule')
+}, indent=2, sort_keys=True) + '\n')
+PY
+
+cd "$submit_dir"
+sha256sum "$manifest" > "$workdir/artifacts/validation_manifest_sha256.txt"
+sha256sum repos/act/imitate_episodes.py repos/act/rollout_logging.py scripts/act_runtime.sh \
+  scripts/run_phase_b_checkpoint_selection.pbs > "$workdir/artifacts/evaluation_source_sha256.txt"
+git rev-parse HEAD > "$workdir/artifacts/code_commit.txt"
+touch "$workdir/artifacts/.complete"
+echo "[INFO] Phase B validation selection complete: demos=$demo_count model=$view_config seed=$train_seed"
