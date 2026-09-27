@@ -9,6 +9,8 @@ submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
 view_config="${VIEW_CONFIG:?VIEW_CONFIG is required}"
 demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
 train_seed="${TRAIN_SEED:-0}"
+selection_name="${SELECTION_NAME:-checkpoint_selection}"
+deterministic_eval="${DETERMINISTIC_EVAL:-0}"
 
 case "$view_config" in
   single_top) camera_names="top" ;;
@@ -18,9 +20,11 @@ case "$view_config" in
 esac
 case "$demo_count" in 5|10|25) ;; *) echo "[ERROR] invalid DEMO_COUNT=$demo_count" >&2; exit 4 ;; esac
 [[ "$train_seed" == 0 ]] || { echo "[ERROR] Phase B selection is seed 0 only" >&2; exit 4; }
+case "$selection_name" in checkpoint_selection|checkpoint_selection_deterministic) ;; *) echo "[ERROR] invalid SELECTION_NAME=$selection_name" >&2; exit 4 ;; esac
+case "$deterministic_eval" in 0|1) ;; *) echo "[ERROR] DETERMINISTIC_EVAL must be 0 or 1" >&2; exit 4 ;; esac
 
 source_dir="$submit_dir/results/act/phase_b/${demo_count}demos/$view_config/train_seed${train_seed}"
-result_dir="$source_dir/checkpoint_selection"
+result_dir="$source_dir/$selection_name"
 manifest="$submit_dir/archives/environments/sim_insertion_validation_seed1100_50.json"
 tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
 mkdir -p "$tmp_work_base"
@@ -55,6 +59,9 @@ source "$submit_dir/scripts/act_runtime.sh"
 normalize_pbs_gpu
 prepare_act_runtime
 export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+if [[ "$deterministic_eval" == 1 ]]; then
+  export ACT_DETERMINISTIC_EVAL=1
+fi
 cd "$repo_stage_dir"
 
 for epoch in 500 1000 1500 2000; do
@@ -73,6 +80,7 @@ done
 export PHASE_B_SELECT_WORKDIR="$workdir" PHASE_B_SELECT_SOURCE="$source_dir"
 export PHASE_B_SELECT_MODEL="$view_config" PHASE_B_SELECT_CAMERAS="$camera_names"
 export PHASE_B_SELECT_DEMOS="$demo_count" PHASE_B_SELECT_SEED="$train_seed"
+export PHASE_B_SELECT_DETERMINISTIC="$deterministic_eval"
 "$act_python" - <<'PY'
 import hashlib
 import json
@@ -119,6 +127,7 @@ summary = {
     'camera_names': os.environ['PHASE_B_SELECT_CAMERAS'].split(','),
     'demo_count': int(os.environ['PHASE_B_SELECT_DEMOS']),
     'training_seed': seed,
+    'deterministic_evaluation': os.environ['PHASE_B_SELECT_DETERMINISTIC'] == '1',
     'selection_rule': 'max success_rate, then max average_return, then earliest optimizer_step',
     'results': rows,
     'selected_checkpoint': selected['checkpoint'],
