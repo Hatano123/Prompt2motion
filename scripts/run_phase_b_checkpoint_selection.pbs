@@ -11,6 +11,9 @@ demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
 train_seed="${TRAIN_SEED:-0}"
 selection_name="${SELECTION_NAME:-checkpoint_selection}"
 deterministic_eval="${DETERMINISTIC_EVAL:-0}"
+experiment_stage="${EXPERIMENT_STAGE:-phase_b}"
+training_method="${TRAINING_METHOD:-naive}"
+output_namespace="${OUTPUT_NAMESPACE:-phase_b}"
 
 case "$view_config" in
   single_top) camera_names="top" ;;
@@ -18,12 +21,21 @@ case "$view_config" in
   multi) camera_names="top,side" ;;
   *) echo "[ERROR] invalid VIEW_CONFIG=$view_config" >&2; exit 4 ;;
 esac
-case "$demo_count" in 5|10|25) ;; *) echo "[ERROR] invalid DEMO_COUNT=$demo_count" >&2; exit 4 ;; esac
-[[ "$train_seed" == 0 ]] || { echo "[ERROR] Phase B selection is seed 0 only" >&2; exit 4; }
+case "$experiment_stage:$training_method:$demo_count" in
+  phase_b:naive:5|phase_b:naive:10|phase_b:naive:25|phase_b:naive:40) ;;
+  phase_d:modality_dropout:10|phase_d:modality_dropout:40|phase_d:viewdrop_gated:10|phase_d:viewdrop_gated:40) ;;
+  *) echo "[ERROR] invalid stage/method/demo: $experiment_stage/$training_method/$demo_count" >&2; exit 4 ;;
+esac
+case "$train_seed" in 0|1|2) ;; *) echo "[ERROR] TRAIN_SEED must be 0, 1, or 2" >&2; exit 4 ;; esac
 case "$selection_name" in checkpoint_selection|checkpoint_selection_deterministic) ;; *) echo "[ERROR] invalid SELECTION_NAME=$selection_name" >&2; exit 4 ;; esac
 case "$deterministic_eval" in 0|1) ;; *) echo "[ERROR] DETERMINISTIC_EVAL must be 0 or 1" >&2; exit 4 ;; esac
 
-source_dir="$submit_dir/results/act/phase_b/${demo_count}demos/$view_config/train_seed${train_seed}"
+if [[ "$experiment_stage" == phase_b ]]; then
+  case "$output_namespace" in phase_b|phase_b_rebuild) ;; *) echo "[ERROR] invalid OUTPUT_NAMESPACE=$output_namespace" >&2; exit 4 ;; esac
+  source_dir="$submit_dir/results/act/${output_namespace}/${demo_count}demos/$view_config/train_seed${train_seed}"
+else
+  source_dir="$submit_dir/results/act/phase_d/${training_method}/${demo_count}demos/$view_config/train_seed${train_seed}"
+fi
 result_dir="$source_dir/$selection_name"
 manifest="$submit_dir/archives/environments/sim_insertion_validation_seed1100_50.json"
 tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
@@ -46,6 +58,10 @@ test -s "$source_dir/dataset_stats.pkl"
 test -s "$source_dir/checkpoint_manifest.json"
 test -s "$manifest"
 [[ ! -e "$result_dir/.complete" ]] || { echo "[ERROR] selection already complete: $result_dir" >&2; exit 5; }
+if [[ -d "$result_dir" ]] && find "$result_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  echo "[ERROR] refusing to overwrite incomplete selection artifacts: $result_dir" >&2
+  exit 5
+fi
 
 mkdir -p "$workdir/checkpoints" "$workdir/artifacts/eval_validation"
 cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
@@ -63,6 +79,8 @@ if [[ "$deterministic_eval" == 1 ]]; then
   export ACT_DETERMINISTIC_EVAL=1
 fi
 cd "$repo_stage_dir"
+model_args=()
+[[ "$training_method" == viewdrop_gated ]] && model_args+=(--fusion_mode gated)
 
 for epoch in 500 1000 1500 2000; do
   checkpoint="policy_epoch_${epoch}_seed_${train_seed}.ckpt"
@@ -74,13 +92,14 @@ for epoch in 500 1000 1500 2000; do
     --eval_seed 1100 --eval_initial_states "$manifest" --no_save_episodes \
     --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size 8 \
     --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed "$train_seed" \
-    --model_name "$view_config" | tee "$workdir/validation_epoch_${epoch}.log"
+    --model_name "$training_method" "${model_args[@]}" | tee "$workdir/validation_epoch_${epoch}.log"
 done
 
 export PHASE_B_SELECT_WORKDIR="$workdir" PHASE_B_SELECT_SOURCE="$source_dir"
 export PHASE_B_SELECT_MODEL="$view_config" PHASE_B_SELECT_CAMERAS="$camera_names"
 export PHASE_B_SELECT_DEMOS="$demo_count" PHASE_B_SELECT_SEED="$train_seed"
 export PHASE_B_SELECT_DETERMINISTIC="$deterministic_eval"
+export EXPERIMENT_STAGE="$experiment_stage" TRAINING_METHOD="$training_method"
 "$act_python" - <<'PY'
 import hashlib
 import json
@@ -127,6 +146,9 @@ summary = {
     'camera_names': os.environ['PHASE_B_SELECT_CAMERAS'].split(','),
     'demo_count': int(os.environ['PHASE_B_SELECT_DEMOS']),
     'training_seed': seed,
+    'experiment_stage': os.environ['EXPERIMENT_STAGE'],
+    'training_method': os.environ['TRAINING_METHOD'],
+    'fusion_mode': 'gated' if os.environ['TRAINING_METHOD'] == 'viewdrop_gated' else 'concat',
     'deterministic_evaluation': os.environ['PHASE_B_SELECT_DETERMINISTIC'] == '1',
     'selection_rule': 'max success_rate, then max average_return, then earliest optimizer_step',
     'results': rows,

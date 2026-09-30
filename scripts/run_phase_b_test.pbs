@@ -11,6 +11,9 @@ demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
 train_seed="${TRAIN_SEED:-0}"
 selection_name="${SELECTION_NAME:-checkpoint_selection_deterministic}"
 deterministic_eval="${DETERMINISTIC_EVAL:-1}"
+experiment_stage="${EXPERIMENT_STAGE:-phase_b}"
+training_method="${TRAINING_METHOD:-naive}"
+output_namespace="${OUTPUT_NAMESPACE:-phase_b}"
 
 case "$view_config" in
   single_top) camera_names="top" ;;
@@ -18,12 +21,21 @@ case "$view_config" in
   multi) camera_names="top,side" ;;
   *) echo "[ERROR] invalid VIEW_CONFIG=$view_config" >&2; exit 4 ;;
 esac
-case "$demo_count" in 5|10|25) ;; *) echo "[ERROR] invalid DEMO_COUNT=$demo_count" >&2; exit 4 ;; esac
-[[ "$train_seed" == 0 ]] || { echo "[ERROR] Phase B stage is seed 0 only" >&2; exit 4; }
+case "$experiment_stage:$training_method:$demo_count" in
+  phase_b:naive:5|phase_b:naive:10|phase_b:naive:25|phase_b:naive:40) ;;
+  phase_d:modality_dropout:10|phase_d:modality_dropout:40|phase_d:viewdrop_gated:10|phase_d:viewdrop_gated:40) ;;
+  *) echo "[ERROR] invalid stage/method/demo: $experiment_stage/$training_method/$demo_count" >&2; exit 4 ;;
+esac
+case "$train_seed" in 0|1|2) ;; *) echo "[ERROR] TRAIN_SEED must be 0, 1, or 2" >&2; exit 4 ;; esac
 case "$selection_name" in checkpoint_selection|checkpoint_selection_deterministic) ;; *) echo "[ERROR] invalid SELECTION_NAME=$selection_name" >&2; exit 4 ;; esac
 case "$deterministic_eval" in 0|1) ;; *) echo "[ERROR] DETERMINISTIC_EVAL must be 0 or 1" >&2; exit 4 ;; esac
 
-source_dir="$submit_dir/results/act/phase_b/${demo_count}demos/$view_config/train_seed${train_seed}"
+if [[ "$experiment_stage" == phase_b ]]; then
+  case "$output_namespace" in phase_b|phase_b_rebuild) ;; *) echo "[ERROR] invalid OUTPUT_NAMESPACE=$output_namespace" >&2; exit 4 ;; esac
+  source_dir="$submit_dir/results/act/${output_namespace}/${demo_count}demos/$view_config/train_seed${train_seed}"
+else
+  source_dir="$submit_dir/results/act/phase_d/${training_method}/${demo_count}demos/$view_config/train_seed${train_seed}"
+fi
 selection_dir="$source_dir/$selection_name"
 result_dir="$source_dir/eval_test"
 selection_json="$selection_dir/validation_summary.json"
@@ -48,6 +60,10 @@ test -s "$selection_json"
 test -s "$source_dir/dataset_stats.pkl"
 test -s "$manifest"
 [[ ! -e "$result_dir/.complete" ]] || { echo "[ERROR] test already complete: $result_dir" >&2; exit 5; }
+if [[ -d "$result_dir" ]] && find "$result_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  echo "[ERROR] refusing to overwrite incomplete test artifacts: $result_dir" >&2
+  exit 5
+fi
 
 selected_checkpoint="$(python3 - "$selection_json" "$deterministic_eval" <<'PY'
 import json, sys
@@ -62,7 +78,7 @@ print(data['selected_checkpoint'])
 PY
 )"
 case "$selected_checkpoint" in
-  policy_epoch_[0-9]*_seed_0.ckpt) ;;
+  policy_epoch_[0-9]*_seed_"$train_seed".ckpt) ;;
   *) echo "[ERROR] unsafe selected checkpoint name: $selected_checkpoint" >&2; exit 5 ;;
 esac
 test -s "$source_dir/$selected_checkpoint"
@@ -85,14 +101,16 @@ if [[ "$deterministic_eval" == 1 ]]; then
   export ACT_DETERMINISTIC_EVAL=1
 fi
 cd "$repo_stage_dir"
+model_args=()
+[[ "$training_method" == viewdrop_gated ]] && model_args+=(--fusion_mode gated)
 
 "$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
   --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt \
   --eval_output_dir "$workdir/output" --visual_condition clean --num_rollouts 100 \
   --eval_seed 1200 --eval_initial_states "$manifest" --no_save_episodes \
-  --save_first_n_episodes 5 --save_timeseries --model_name "$view_config" \
+  --save_first_n_episodes 5 --save_timeseries --model_name "$training_method" \
   --policy_class ACT --kl_weight 10 --chunk_size 100 --hidden_dim 512 --batch_size 8 \
-  --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed "$train_seed" \
+  --dim_feedforward 3200 --num_epochs 2000 --lr 1e-5 --seed "$train_seed" "${model_args[@]}" \
   | tee "$workdir/test.log"
 
 "$act_python" "$submit_dir/scripts/validate_rollout_timeseries.py" \

@@ -1,0 +1,14 @@
+# Legacy exploratory outputs not referenced by the Phase B--E pipeline.
+# Repository-relative paths only. Scripts, configs, reports, and current phase
+# artifacts are intentionally excluded.
+results/act/minimal_multiview_99260
+results/act/minimal_multiview_99261
+results/act/minimal_multiview_99332
+results/act/minimal_multiview_99396
+results/act/singleview_insertion_10demo_seed0_99883
+results/act/qsub_95518
+results/act/qsub_95520
+results/act/qsub_95521
+results/act/qsub_95524
+results/act/qsub_95525
+results/act/gpu_probe_95523

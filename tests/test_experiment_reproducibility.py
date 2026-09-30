@@ -12,7 +12,7 @@ SCRIPTS_ROOT = os.path.join(REPOSITORY_ROOT, 'scripts')
 sys.path.insert(0, ACT_ROOT)
 sys.path.insert(0, SCRIPTS_ROOT)
 
-from experiment_utils import sample_occlusion_rectangle
+from experiment_utils import sample_occlusion_rectangle, shifted_camera_pose
 from generate_insertion_eval_manifest import generate_states
 
 
@@ -36,6 +36,12 @@ class ReproducibilityTest(unittest.TestCase):
             y0, y1, x0, x1 = rectangle
             actual_fraction = (y1 - y0) * (x1 - x0) / (480 * 640)
             self.assertAlmostEqual(fraction, actual_fraction, delta=0.002)
+
+    def test_camera_pose_shift_is_absolute_and_normalized(self):
+        position, quaternion = shifted_camera_pose(
+            [0.0, 0.6, 0.8], [1.0, 0.0, 0.0, 0.0], [0.03, 0.0, 0.0], 5.0)
+        np.testing.assert_allclose(position, [0.03, 0.6, 0.8])
+        self.assertAlmostEqual(float(np.linalg.norm(quaternion)), 1.0)
 
     def test_one_dataset_supports_all_camera_selections(self):
         try:

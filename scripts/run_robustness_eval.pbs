@@ -1,0 +1,150 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32gb
+#PBS -l walltime=06:00:00
+#PBS -N act_robust
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+source_stage="${SOURCE_STAGE:?SOURCE_STAGE is required}"
+training_method="${TRAINING_METHOD:-naive}"
+demo_count="${DEMO_COUNT:?DEMO_COUNT is required}"
+view_config="${VIEW_CONFIG:?VIEW_CONFIG is required}"
+train_seed="${TRAIN_SEED:?TRAIN_SEED is required}"
+condition="${ROBUSTNESS_CONDITION:?ROBUSTNESS_CONDITION is required}"
+corruption_camera="${CORRUPTION_CAMERA:-none}"
+
+case "$view_config" in
+  single_top) camera_names=top ;;
+  single_side) camera_names=side ;;
+  multi) camera_names=top,side ;;
+  *) echo "[ERROR] invalid VIEW_CONFIG=$view_config" >&2; exit 4 ;;
+esac
+case "$train_seed" in 0|1|2) ;; *) echo "[ERROR] invalid TRAIN_SEED=$train_seed" >&2; exit 4 ;; esac
+case "$condition" in clean|occlusion25|occlusion50|missing|pose_shift) ;; *) echo "[ERROR] invalid condition=$condition" >&2; exit 4 ;; esac
+if [[ "$condition" == clean ]]; then
+  [[ "$corruption_camera" == none ]] || { echo "[ERROR] clean requires CORRUPTION_CAMERA=none" >&2; exit 4; }
+else
+  [[ ",$camera_names," == *",$corruption_camera,"* ]] || {
+    echo "[ERROR] camera $corruption_camera is not used by $view_config" >&2; exit 4;
+  }
+fi
+
+source "$submit_dir/scripts/experiment_paths.sh"
+source_dir=$(experiment_source_dir "$submit_dir" "$source_stage" "$training_method" \
+  "$demo_count" "$view_config" "$train_seed")
+selection_json=$(experiment_selection_json "$source_dir")
+readarray -t selection_fields < <(python3 - "$selection_json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+if data.get('selection_dataset') != 'fixed_validation_manifest':
+    raise SystemExit('checkpoint was not selected on the fixed validation manifest')
+if data.get('heldout_test_used_for_selection') is not False:
+    raise SystemExit('held-out test must not be used for checkpoint selection')
+if data.get('deterministic_evaluation') is not True:
+    raise SystemExit('robustness evaluation requires deterministic checkpoint selection')
+name = data.get('selected_checkpoint') or \
+       f"policy_epoch_{data['selected_epoch']}_seed_{data['training_seed']}.ckpt"
+digest = data.get('selected_checkpoint_sha256')
+if not isinstance(digest, str) or len(digest) != 64:
+    raise SystemExit('selection summary has no valid selected checkpoint SHA-256')
+print(name)
+print(digest)
+PY
+)
+selected_checkpoint=${selection_fields[0]}
+expected_checkpoint_sha256=${selection_fields[1]}
+case "$selected_checkpoint" in
+  policy_epoch_[0-9]*_seed_"$train_seed".ckpt) ;;
+  *) echo "[ERROR] unsafe selected checkpoint name: $selected_checkpoint" >&2; exit 5 ;;
+esac
+test -s "$source_dir/$selected_checkpoint" || {
+  echo "[ERROR] selected checkpoint is unavailable: $source_dir/$selected_checkpoint" >&2
+  exit 5
+}
+actual_checkpoint_sha256=$(sha256sum "$source_dir/$selected_checkpoint" | awk '{print $1}')
+[[ "$actual_checkpoint_sha256" == "$expected_checkpoint_sha256" ]] || {
+  echo "[ERROR] selected checkpoint SHA-256 mismatch" >&2
+  exit 5
+}
+
+condition_label="$condition"
+[[ "$corruption_camera" != none ]] && condition_label="${condition}_${corruption_camera}"
+if [[ "$source_stage" == phase_b ]]; then
+  result_dir="$submit_dir/results/act/phase_c/${demo_count}demos/$view_config/train_seed${train_seed}/$condition_label"
+else
+  result_dir="$source_dir/eval_robustness/$condition_label"
+fi
+[[ ! -e "$result_dir/.complete" ]] || { echo "[ERROR] already complete: $result_dir" >&2; exit 5; }
+if [[ -d "$result_dir" ]] && find "$result_dir" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  echo "[ERROR] refusing to overwrite incomplete evaluation artifacts: $result_dir" >&2
+  exit 5
+fi
+
+tmp_work_base="${TMP_WORK_BASE:-/tmp/${USER}_work}"
+mkdir -p "$tmp_work_base"
+workdir=$(mktemp -d "${tmp_work_base%/}/act_robust_${demo_count}_${view_config}_${train_seed}_XXXXXX")
+cleanup() {
+  status=$?
+  trap - EXIT
+  mkdir -p "$result_dir"
+  cp -a "$workdir/output"/. "$result_dir"/ 2>/dev/null || true
+  cp -a "$workdir"/*.log "$result_dir"/ 2>/dev/null || true
+  [[ "${KEEP_TMP:-0}" == 1 ]] || rm -rf -- "$workdir"
+  exit "$status"
+}
+trap cleanup EXIT
+
+mkdir -p "$workdir/checkpoints" "$workdir/output"
+cp "$source_dir/$selected_checkpoint" "$workdir/checkpoints/selected_policy.ckpt"
+cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
+source "$submit_dir/scripts/act_runtime.sh"
+normalize_pbs_gpu
+prepare_act_runtime
+export ACT_DATA_DIR="$workdir/unused" ACT_NUM_EPISODES=50 ACT_CAMERA_NAMES="$camera_names"
+export ACT_DETERMINISTIC_EVAL=1
+
+visual_condition=clean
+condition_args=()
+case "$condition" in
+  clean) ;;
+  occlusion25) visual_condition=occlusion; condition_args+=(--occlusion_area_fraction 0.25 --occlusion_seed 2200) ;;
+  occlusion50) visual_condition=occlusion; condition_args+=(--occlusion_area_fraction 0.50 --occlusion_seed 2200) ;;
+  missing) visual_condition=missing ;;
+  pose_shift) visual_condition=pose_shift; condition_args+=(--camera_shift_translation 0.03 0 0 --camera_shift_yaw_degrees 5) ;;
+esac
+[[ "$corruption_camera" == none ]] || condition_args+=(--corruption_camera "$corruption_camera")
+model_args=()
+[[ "$training_method" == viewdrop_gated ]] && model_args+=(--fusion_mode gated)
+manifest="$submit_dir/archives/environments/sim_insertion_test_seed1200_100.json"
+test -s "$manifest"
+
+cd "$repo_stage_dir"
+"$act_python" imitate_episodes.py --eval --task_name sim_insertion_scripted \
+  --ckpt_dir "$workdir/checkpoints" --eval_ckpt selected_policy.ckpt \
+  --eval_output_dir "$workdir/output" --visual_condition "$visual_condition" \
+  "${condition_args[@]}" --num_rollouts 100 --eval_seed 1200 \
+  --eval_initial_states "$manifest" --no_save_episodes --save_first_n_episodes 2 \
+  --save_timeseries --model_name "$training_method" --policy_class ACT --kl_weight 10 \
+  --chunk_size 100 --hidden_dim 512 --batch_size 8 --dim_feedforward 3200 \
+  --num_epochs 2000 --lr 1e-5 --seed "$train_seed" "${model_args[@]}" \
+  | tee "$workdir/evaluation.log"
+
+"$act_python" "$submit_dir/scripts/validate_rollout_timeseries.py" \
+  "$workdir/output/timeseries" --manifest "$manifest" | tee "$workdir/timeseries_validation.log"
+cd "$submit_dir"
+cp "$selection_json" "$workdir/output/checkpoint_selection_summary.json"
+sha256sum "$manifest" > "$workdir/output/test_manifest_sha256.txt"
+sha256sum "$source_dir/$selected_checkpoint" > "$workdir/output/selected_checkpoint_sha256.txt"
+sha256sum repos/act/imitate_episodes.py repos/act/policy.py \
+  repos/act/detr/models/detr_vae.py scripts/run_robustness_eval.pbs \
+  > "$workdir/output/evaluation_source_sha256.txt"
+python3 - "$workdir/output/run_spec.json" <<PY
+import json, sys
+json.dump({"source_stage":"$source_stage","training_method":"$training_method",
+ "demo_count":$demo_count,"view_config":"$view_config","training_seed":$train_seed,
+ "condition":"$condition","corruption_camera":"$corruption_camera"},
+ open(sys.argv[1], "w"), indent=2, sort_keys=True)
+PY
+touch "$workdir/output/.complete"
+echo "[INFO] robustness evaluation complete: $condition_label"

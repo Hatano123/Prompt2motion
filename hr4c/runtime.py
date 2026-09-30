@@ -64,6 +64,12 @@ class SafetyFilter:
             raise SafetyViolation("qpos dimension does not match configured joints")
         if not np.all(np.isfinite(observation.qpos)):
             raise SafetyViolation("qpos contains a non-finite value")
+        if (np.any(observation.qpos < self.config.joint_min) or
+                np.any(observation.qpos > self.config.joint_max)):
+            raise SafetyViolation("observed joint position exceeds a configured limit")
+        if any(abs(now - stamp) > self.config.observation_timeout_s
+               for stamp in timestamps):
+            raise SafetyViolation("camera frame is stale or has an invalid future timestamp")
 
     def filter_action(self, target: np.ndarray, observation: Observation,
                       now: float | None = None) -> np.ndarray:

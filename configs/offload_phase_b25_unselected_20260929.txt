@@ -1,0 +1,11 @@
+# Unselected 25-demo candidate checkpoints. Deterministic selection and held-out
+# tests are complete; the selected checkpoint in each run remains local.
+results/act/phase_b/25demos/single_top/train_seed0/policy_epoch_500_seed_0.ckpt
+results/act/phase_b/25demos/single_top/train_seed0/policy_epoch_1000_seed_0.ckpt
+results/act/phase_b/25demos/single_top/train_seed0/policy_epoch_1500_seed_0.ckpt
+results/act/phase_b/25demos/single_side/train_seed0/policy_epoch_500_seed_0.ckpt
+results/act/phase_b/25demos/single_side/train_seed0/policy_epoch_1500_seed_0.ckpt
+results/act/phase_b/25demos/single_side/train_seed0/policy_epoch_2000_seed_0.ckpt
+results/act/phase_b/25demos/multi/train_seed0/policy_epoch_500_seed_0.ckpt
+results/act/phase_b/25demos/multi/train_seed0/policy_epoch_1000_seed_0.ckpt
+results/act/phase_b/25demos/multi/train_seed0/policy_epoch_2000_seed_0.ckpt

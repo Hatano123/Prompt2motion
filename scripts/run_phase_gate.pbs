@@ -1,0 +1,25 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=1:mem=2gb
+#PBS -l walltime=00:10:00
+#PBS -N act_phase_gate
+
+set -euo pipefail
+submit_dir="${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+phase="${PHASE_GATE:?PHASE_GATE is required}"
+case "$phase" in b0|b|c|d) ;; *) echo "[ERROR] invalid PHASE_GATE=$phase" >&2; exit 4 ;; esac
+
+case "$phase" in
+  b0) output="results/act/phase_b/preflight/phase_b0_complete.json" ;;
+  b) output="results/act/phase_b/preflight/phase_b_complete.json" ;;
+  c) output="results/act/phase_c/phase_c_complete.json" ;;
+  d) output="results/act/phase_d/phase_d_complete.json" ;;
+esac
+
+cd "$submit_dir"
+if [[ -s "$output" ]]; then
+  echo "[SKIP] immutable gate already exists: $output"
+  exit 0
+fi
+python3 scripts/audit_phase_gate.py --phase "$phase" --output "$output"
+echo "[OK] phase gate created: $output"

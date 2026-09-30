@@ -1,0 +1,23 @@
+{
+  "hardware_enabled": false,
+  "adapter_module": "REPLACE_WITH_VENDOR_ADAPTER",
+  "robot_serial": "REPLACE_ME",
+  "ros_version": "REPLACE_ME",
+  "joint_names": [],
+  "joint_min": [],
+  "joint_max": [],
+  "max_step": [],
+  "observation_timeout_s": 0.1,
+  "max_camera_skew_s": 0.02,
+  "control_hz": 10,
+  "cameras": {
+    "top": {"frame_id": "REPLACE_ME", "intrinsics_file": "REPLACE_ME", "extrinsics_file": "REPLACE_ME"},
+    "side": {"frame_id": "REPLACE_ME", "intrinsics_file": "REPLACE_ME", "extrinsics_file": "REPLACE_ME"}
+  },
+  "safety_documents": [],
+  "estop_verified": false,
+  "protective_stop_verified": false,
+  "synchronized_dual_arm_stop_verified": false,
+  "workspace_limits_verified": false,
+  "insertion_force_limit_verified": false
+}

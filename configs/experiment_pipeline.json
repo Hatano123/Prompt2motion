@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "dataset_archive": "archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip",
+  "validation_manifest": "archives/environments/sim_insertion_validation_seed1100_50.json",
+  "test_manifest": "archives/environments/sim_insertion_test_seed1200_100.json",
+  "training": {
+    "optimizer_steps": 10000,
+    "checkpoint_steps": [2500, 5000, 7500, 10000],
+    "seeds": [0, 1, 2],
+    "views": ["single_top", "single_side", "multi"]
+  },
+  "phase_b": {
+    "demo_counts": [5, 10, 25, 40],
+    "b0_demo_counts": [5, 10, 25],
+    "new_training_demo_counts": [5, 10, 25, 40],
+    "reason_40demo_rebuild": "Clean-50 metrics are retained but its selected checkpoint files are unavailable"
+  },
+  "phase_c": {
+    "demo_counts": [10, 40],
+    "conditions": ["clean", "occlusion25", "occlusion50", "missing", "pose_shift"],
+    "occlusion_seed": 2200,
+    "pose_shift_translation_m": [0.03, 0.0, 0.0],
+    "pose_shift_yaw_degrees": 5.0
+  },
+  "phase_d": {
+    "demo_counts": [10, 40],
+    "methods": ["modality_dropout", "viewdrop_gated"],
+    "view": "multi",
+    "modality_dropout_probability": 0.3,
+    "local_occlusion_probability": 0.3,
+    "local_occlusion_area_fraction": 0.25
+  },
+  "storage": {
+    "checkpoint_bytes_per_training_run": 1344472356,
+    "gated_checkpoint_bytes_per_training_run": 2700000000,
+    "timeseries_bytes_per_100_rollouts": 50000000,
+    "safety_reserve_bytes": 2147483648
+  },
+  "phase_e": {
+    "mode": "hardware_locked_until_readiness_audit",
+    "required_cameras": ["top", "side"],
+    "pilot_demonstrations": 10,
+    "main_demonstrations_min": 20,
+    "main_demonstrations_max": 30
+  }
+}

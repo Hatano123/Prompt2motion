@@ -7,6 +7,8 @@ import numpy as np
 
 from hr4c.recording import write_episode, write_episode_npz
 from hr4c.runtime import Observation, SafetyConfig, SafetyFilter, SafetyViolation
+from hr4c.executor import run_bounded_episode
+from hr4c.mock_adapter import MockHR4CAdapter
 
 
 class HR4CRuntimeTest(unittest.TestCase):
@@ -63,6 +65,21 @@ class HR4CRuntimeTest(unittest.TestCase):
             with np.load(path) as data:
                 self.assertEqual((1, 2), data["action"].shape)
                 self.assertEqual((1, 2, 3, 3), data["image_top"].shape)
+
+    def test_bounded_executor_always_stops_adapter(self):
+        adapter = MockHR4CAdapter(2, ["top", "side"], image_size=(2, 3))
+        records = run_bounded_episode(
+            adapter, self.filter, lambda observation: np.array([0.5, -0.5]),
+            max_steps=2, continue_signal=lambda: True)
+        self.assertEqual(2, len(records))
+        self.assertTrue(adapter.stopped)
+
+    def test_bounded_executor_stops_when_deadman_released(self):
+        adapter = MockHR4CAdapter(2, ["top", "side"], image_size=(2, 3))
+        with self.assertRaises(RuntimeError):
+            run_bounded_episode(adapter, self.filter, lambda observation: np.zeros(2),
+                                max_steps=2, continue_signal=lambda: False)
+        self.assertTrue(adapter.stopped)
 
 
 if __name__ == "__main__":

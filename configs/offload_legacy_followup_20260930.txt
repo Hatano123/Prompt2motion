@@ -1,0 +1,4 @@
+# Legacy results retained in Drive; documentation and scripts remain local.
+results/act/qsub_95652
+results/act/paired_pilot
+results/act/paired_pilot_batch1

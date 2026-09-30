@@ -1,0 +1,2 @@
+# Regenerable Phase-A dynamic-frame image cache; analysis tables remain local.
+results/act/clean50/analysis/dynamic_frames
