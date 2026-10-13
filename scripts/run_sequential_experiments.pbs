@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -q Eduq
+#PBS -l select=1:ncpus=4:ngpus=1:mem=64gb
+#PBS -l walltime=08:00:00
+#PBS -N act_sequential
+
+set -euo pipefail
+ulimit -c 0
+cd "${PBS_O_WORKDIR:?PBS_O_WORKDIR is required}"
+test -n "${SEQUENTIAL_PLAN:-}"
+export SEQUENTIAL_WALLTIME_SECONDS=28800
+args=(run --plan "$SEQUENTIAL_PLAN" --prune)
+if [[ -n "${OFFLOAD_DESTINATION:-}" ]]; then
+  args+=(--destination "$OFFLOAD_DESTINATION")
+fi
+python3 scripts/sequential_experiment_runner.py "${args[@]}"

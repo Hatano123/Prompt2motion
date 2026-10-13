@@ -84,14 +84,9 @@ esac
 test -s "$source_dir/$selected_checkpoint"
 
 expected_sha256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected_checkpoint_sha256"])' "$selection_json")"
-actual_sha256="$(sha256sum "$source_dir/$selected_checkpoint" | awk '{print $1}')"
-[[ "$actual_sha256" == "$expected_sha256" ]] || {
-  echo "[ERROR] selected checkpoint SHA-256 mismatch" >&2
-  exit 5
-}
-
 mkdir -p "$workdir/checkpoints" "$workdir/output"
-cp "$source_dir/$selected_checkpoint" "$workdir/checkpoints/selected_policy.ckpt"
+python3 "$submit_dir/scripts/experiment_io.py" "$source_dir/$selected_checkpoint" \
+  "$workdir/checkpoints/selected_policy.ckpt" --sha256 "$expected_sha256"
 cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
 source "$submit_dir/scripts/act_runtime.sh"
 normalize_pbs_gpu

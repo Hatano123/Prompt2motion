@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "offload_destination": "/REPLACE_WITH_APPROVED_EXTERNAL_STORAGE/prompt2motion",
+  "inputs": {
+    "archives/datasets/act_sim_insertion_scripted_top_side_seed0_50episodes.zip": "e1513528847f2f565b1398369183bb27bde254490a46efd4107d51949d915893",
+    "archives/environments/sim_insertion_validation_seed1100_50.json": "4276196952ea5ce9a9576148385cc750b883d02c6c25215f29bb8f28cb7d21d1",
+    "archives/environments/sim_insertion_test_seed1200_100.json": "d4462f7927d7beda491204f355ae30638e03408c6966c29ec353ac3f9a5dcd25"
+  },
+  "runs": [
+    "phase_b/25demos/single_top/train_seed0",
+    "phase_b/25demos/single_side/train_seed0",
+    "phase_b/25demos/multi/train_seed0",
+    "phase_b/10demos/single_top/train_seed1",
+    "phase_b/10demos/single_side/train_seed1",
+    "phase_b/10demos/multi/train_seed1",
+    "phase_b/25demos/single_top/train_seed1",
+    "phase_b/25demos/single_side/train_seed1",
+    "phase_b/25demos/multi/train_seed1",
+    "phase_b/40demos/single_top/train_seed1",
+    "phase_b/40demos/single_side/train_seed1",
+    "phase_b/40demos/multi/train_seed1"
+  ]
+}

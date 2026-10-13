@@ -68,7 +68,8 @@ cp "$source_dir/dataset_stats.pkl" "$workdir/checkpoints/"
 for epoch in 500 1000 1500 2000; do
   checkpoint="policy_epoch_${epoch}_seed_${train_seed}.ckpt"
   test -s "$source_dir/$checkpoint"
-  cp "$source_dir/$checkpoint" "$workdir/checkpoints/"
+  python3 "$submit_dir/scripts/experiment_io.py" "$source_dir/$checkpoint" \
+    "$workdir/checkpoints/$checkpoint" --manifest "$source_dir/checkpoint_manifest.json"
 done
 
 source "$submit_dir/scripts/act_runtime.sh"
